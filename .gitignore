@@ -3,6 +3,7 @@
 *.lo
 *.o
 .libs/
+.lycheecache
 build/
 modules/
 run-tests.php
