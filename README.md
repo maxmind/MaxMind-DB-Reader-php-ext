@@ -23,7 +23,7 @@ brew install libmaxminddb
 ```
 
 ### Windows
-See [libmaxminddb installation instructions](https://github.com/maxmind/libmaxminddb#on-windows).
+See [libmaxminddb installation instructions](https://github.com/maxmind/libmaxminddb#installation).
 
 ## Documentation
 
