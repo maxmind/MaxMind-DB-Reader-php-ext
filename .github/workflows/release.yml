@@ -726,6 +726,7 @@ jobs:
           persist-credentials: false
 
       - name: Build the extension
+        id: build
         uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
           extension-url: https://github.com/maxmind/MaxMind-DB-Reader-php
@@ -758,12 +759,27 @@ jobs:
       # suite skips 001 and 002 on !extension_loaded('maxminddb') and only 003
       # fails, which is how a DLL with no get_module export was published as
       # 2 skipped, 1 failed.
+      #
+      # Runs even when the build reports failure, because that is the case it
+      # was written for and the one case it had never seen: when the object
+      # collision was reintroduced, the build failed on that same 003 and this
+      # step was skipped, so the gate sat out the only run that ever produced
+      # the defect it exists to name. A build can fail and still leave a DLL
+      # worth an opinion, and "the DLL exports no get_module" is the diagnosis;
+      # "1 failed" is a symptom. -BuildFailed keeps a build that died before
+      # linking from being reported as a gate failure -- see the script.
+      #
+      # Tested against 'success' rather than 'failure' so that a *skipped* build
+      # counts too: a checkout that fails leaves the build unrun, which is no
+      # more the gate's news than a build that crashed.
       - name: Gate the built DLL
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: >-
           ./dev-bin/gate-extension.ps1 ext MaxMind-DB-Reader-php/dev-bin/verify-extension.php
           MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb
           ${{ needs.setup.outputs.mmdb-version }}
+          ${{ steps.build.outcome != 'success' && '-BuildFailed' || '' }}
 
   verify-assets:
     name: Verify the staged assets

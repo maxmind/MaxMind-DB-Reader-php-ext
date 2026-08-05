@@ -6,11 +6,21 @@
 # downloaded -- exists on the Unix lanes, and nothing the bash gate uses exists
 # here.
 #
-# Usage: gate-extension.ps1 <build root> <verifier> <database>
+# Usage: gate-extension.ps1 <build root> <verifier> <database> <version> [-BuildFailed]
 #
 # <build root> is the directory php/php-windows-builder was told to build in. It
 # builds under a per-run subdirectory of that, which is where both the DLL and
 # the php-bin it was built against are found.
+#
+# -BuildFailed says the build step has already failed, which the caller knows
+# and this script cannot tell: a build that dies before linking leaves the same
+# empty tree as one that never ran. It downgrades exactly two things to a note
+# -- an absent build root and an absent DLL -- because the build has already
+# reported the real cause and a second ::error:: would only compete with it.
+#
+# It deliberately stops there. A DLL that is present but wrong is still
+# rejected, which is the whole reason to run on a failed build: the failure is
+# often a symptom of the defect rather than a reason not to look for it.
 #
 # There is deliberately no Windows analogue of the .so's libmaxminddb NEEDED
 # check. The libmaxminddb that PHP publishes for Windows is a static
@@ -27,7 +37,9 @@ param(
     [Parameter(Mandatory = $true, Position = 2, HelpMessage = 'Path to a test database')]
     [string] $Database,
     [Parameter(Mandatory = $true, Position = 3, HelpMessage = 'Expected MMDB_LIB_VERSION')]
-    [string] $ExpectedVersion
+    [string] $ExpectedVersion,
+    [Parameter(HelpMessage = 'The build step already failed; do not report missing artefacts as errors')]
+    [switch] $BuildFailed
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +53,11 @@ function Fail([string] $Message) {
     throw $Message
 }
 
+function Skip([string] $Message) {
+    Write-Host "The build failed $Message, so there is nothing here to gate."
+    exit 0
+}
+
 function Find-Only([string] $What, $Candidates) {
     $found = @($Candidates | Where-Object { $null -ne $_ })
     if ($found.Count -ne 1) {
@@ -49,7 +66,16 @@ function Find-Only([string] $What, $Candidates) {
     return $found[0].FullName
 }
 
-foreach ($path in @($BuildRoot, $Verifier, $Database)) {
+# $Verifier and $Database come from the checkout that precedes the build, so
+# they are missing only if something is wrong with this workflow rather than
+# with the build, and that is worth an error even on a failed run.
+if (-not (Test-Path -LiteralPath $BuildRoot)) {
+    if ($BuildFailed) {
+        Skip "before creating $BuildRoot"
+    }
+    Fail "$BuildRoot does not exist."
+}
+foreach ($path in @($Verifier, $Database)) {
     if (-not (Test-Path -LiteralPath $path)) {
         Fail "$path does not exist."
     }
@@ -58,10 +84,18 @@ foreach ($path in @($BuildRoot, $Verifier, $Database)) {
 # -ErrorAction SilentlyContinue on the walks below because the build tree holds
 # unpacked PHP and SDK archives whose paths can be too long to enumerate. A path
 # that could not be walked shows up as a file that was not found, which fails.
-$dll = Find-Only 'php_maxminddb.dll' (
+$dlls = @(
     Get-ChildItem -LiteralPath $BuildRoot -Recurse -File -Filter 'php_maxminddb.dll' `
         -ErrorAction SilentlyContinue
 )
+# The last absence a failed build accounts for, and the narrowest useful place
+# to stop: everything below is required of it even then. Once a DLL exists the
+# build reached the linker, php-bin was downloaded long before that, and a
+# missing one is its own anomaly rather than a consequence of the failure.
+if ($dlls.Count -eq 0 -and $BuildFailed) {
+    Skip 'before producing a DLL'
+}
+$dll = Find-Only 'php_maxminddb.dll' $dlls
 # The PHP the extension was built against, and the only one whose version,
 # thread safety and architecture are guaranteed to match it.
 $php = Find-Only 'php-bin\php.exe' (
