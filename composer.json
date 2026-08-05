@@ -24,7 +24,7 @@
     "priority": 50,
     "support-zts": true,
     "support-nts": true,
-    "download-url-method": "pre-packaged-source",
+    "download-url-method": ["pre-packaged-binary", "pre-packaged-source"],
     "configure-options": [
       {
         "name": "with-maxminddb",

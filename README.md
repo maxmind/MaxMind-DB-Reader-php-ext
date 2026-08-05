@@ -8,9 +8,13 @@ This is the C extension for MaxMind DB Reader, providing significantly faster IP
 pie install maxmind-db/reader-ext
 ```
 
+Precompiled binaries for common platforms are attached to each release, so on
+those platforms no compiler or library headers are needed. Elsewhere PIE falls
+back to building the extension from source.
+
 ## Prerequisites
 
-The extension requires the libmaxminddb C library:
+When building from source, the extension requires the libmaxminddb C library:
 
 ### Ubuntu/Debian
 ```bash
