@@ -905,6 +905,31 @@ jobs:
           MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb
           $env:MMDB_VERSION -BuildFailed:($env:BUILD_FAILED -eq 'true')
 
+  gate-tests:
+    name: Test the Windows gate
+    # gate-extension.ps1 is the only thing standing between an unloadable DLL
+    # and a published Windows asset, and until now it was only ever observed
+    # succeeding -- the run that produced the defect it exists to name never
+    # reached it. This runs its rejection cases, and its accept case, on every
+    # pull request. verify-assets depends on it, so a gate that has stopped
+    # working blocks publication rather than waving it through.
+    #
+    # Linux, where pwsh is preinstalled: the script's dumpbin lookup goes
+    # through PATH and its load check runs whatever php.exe it found, so both
+    # are shimmable. Real dumpbin output against a real DLL stays the Windows
+    # lane's job.
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - run: dev-bin/test-gate-extension-windows.sh
+
   verify-assets:
     name: Verify the staged assets
     # The fan-in for every build lane, and the only place the asset set is
@@ -917,7 +942,7 @@ jobs:
     # condition instead: a failure anywhere upstream is the only thing that
     # should stop the assets being checked.
     if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
-    needs: [setup, source-tarball, source-build, linux, macos, windows-matrix, windows]
+    needs: [setup, source-tarball, source-build, linux, macos, windows-matrix, windows, gate-tests]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
