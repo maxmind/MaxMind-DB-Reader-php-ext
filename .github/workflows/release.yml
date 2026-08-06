@@ -658,8 +658,8 @@ jobs:
     name: macOS arm64 PHP ${{ matrix.php-version }} ${{ matrix.ts }}
     needs: [setup]
     # macos-14 is the oldest arm64 image GitHub offers. There is no container
-    # equivalent of the Linux glibc pin on macOS, so the floor is set by
-    # MACOSX_DEPLOYMENT_TARGET below and asserted in the gate step.
+    # equivalent of the Linux glibc pin on macOS, so the floor is set by the
+    # deployment target the build step exports and asserted in the gate step.
     runs-on: macos-14
     permissions:
       contents: read
@@ -668,11 +668,6 @@ jobs:
       matrix:
         php-version: ${{ fromJSON(needs.setup.outputs.php-versions) }}
         ts: ${{ fromJSON(needs.setup.outputs.ts-modes) }}
-    env:
-      # arm64 macOS starts at 11.0, so this is the lowest useful floor. Pinning
-      # it rather than taking the SDK default keeps the floor from drifting
-      # when GitHub updates the runner's Xcode.
-      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - name: Install PHP
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
@@ -690,6 +685,12 @@ jobs:
           persist-credentials: false
 
       - name: Build
+        env:
+          # What the compiler targets. arm64 macOS starts at 11.0, so this is
+          # the lowest useful floor; pinning it rather than taking the SDK
+          # default keeps it from drifting when GitHub updates the runner's
+          # Xcode.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: |
           if ! command -v autoconf >/dev/null; then
             brew install autoconf
@@ -697,6 +698,22 @@ jobs:
           dev-bin/build-ext.sh MaxMind-DB-Reader-php/ext "$RUNNER_TEMP/out"
 
       - name: Gate the built object
+        env:
+          # The ceiling the measured minos is compared against -- deliberately
+          # a second, independent declaration rather than one job-level value
+          # shared with the build above.
+          #
+          # As job-level env this was both the compiler's input and the gate's
+          # expectation, so the assertion could only fire if the toolchain had
+          # ignored the variable; it could never fire on a wrong value. Raising
+          # the build to "15.0" would have silently dropped support for macOS
+          # 11 through 14 while the gate reported a pass against its own new
+          # number.
+          #
+          # Declared twice so the two can disagree, which is the same reason
+          # MAX_GLIBC is separate from the container that sets the Linux floor.
+          # Change one and the gate says so.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
         run: MaxMind-DB-Reader-php/dev-bin/gate-extension.sh "$RUNNER_TEMP/out/maxminddb.so"
 
       - name: Load and query in a clean environment
