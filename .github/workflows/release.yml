@@ -193,6 +193,16 @@ jobs:
     permissions:
       contents: write # create the draft release
     steps:
+      # --notes-from-tag reads the annotation out of a local clone rather than
+      # the API, so without a checkout it always fails and the notes silently
+      # become GitHub's generated commit list. This job runs only on a release,
+      # where checkout-ref is the tag, and actions/checkout fetches a tag ref
+      # into refs/tags, which is what makes the annotation readable below.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          persist-credentials: false
+
       - name: Find or create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -201,34 +211,65 @@ jobs:
         run: |
           # Assets cannot be added to a published, immutable release, so the
           # whole run stages onto a draft that publish flips at the very end.
+          # Finding an existing release therefore has to answer two different
+          # questions with two different mechanisms.
           #
-          # Reusing an existing release therefore has to check that it is still
-          # a draft, not merely that it exists: `gh release view` succeeds for
-          # published releases too, and staging onto one would replace bytes
-          # under a tag users may already have installed.
-          #
+          # Published: /releases/tags/{tag} returns published releases only, so
+          # any success here means published and there is nothing to inspect.
           # A 404 is the only result that means "not there yet"; every other
           # failure -- auth, rate limit, a 5xx -- must not be mistaken for it.
-          if body="$(gh api "repos/${GH_REPO}/releases/tags/${TAG}" 2>"$RUNNER_TEMP/gh.err")"; then
-            if [ "$(jq -r .draft <<<"$body")" != true ]; then
-              echo "::error::Release $TAG exists and is already published; refusing to stage assets onto it."
-              exit 1
-            fi
-            echo "Draft release $TAG already exists; reusing it."
-            exit 0
+          if gh api "repos/${GH_REPO}/releases/tags/${TAG}" >/dev/null 2>"$RUNNER_TEMP/gh.err"; then
+            echo "::error::Release $TAG exists and is already published; refusing to stage assets onto it."
+            exit 1
           elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/gh.err"; then
             cat "$RUNNER_TEMP/gh.err"
             echo "::error::Could not determine whether release $TAG exists; refusing to guess."
             exit 1
           fi
+
+          # Draft: a draft has no git tag until it is published, so that
+          # endpoint cannot see one and 404s for it too -- which is why gh
+          # itself resolves drafts through GraphQL. Listing does see them.
+          #
+          # This matters because GitHub does not require draft tag names to be
+          # unique. Left to fall through to `gh release create`, a re-cut would
+          # add a *second* draft rather than reusing the first, and publish
+          # would then upload to one while un-drafting whichever the API
+          # happened to return.
+          if ! releases="$(gh release list --limit 100 --json tagName,isDraft)"; then
+            echo "::error::Could not list releases; refusing to guess whether a draft $TAG exists."
+            exit 1
+          fi
+          drafts="$(jq --arg tag "$TAG" '[.[] | select(.tagName == $tag and .isDraft)] | length' <<<"$releases")"
+          if [ "$drafts" -gt 1 ]; then
+            echo "::error::$drafts drafts are tagged $TAG; publish cannot tell which to ship. Delete the extras."
+            exit 1
+          fi
+          if [ "$drafts" -eq 1 ]; then
+            echo "Draft release $TAG already exists; reusing it."
+            exit 0
+          fi
+
           # Releases here are titled without the tag's leading "v": v1.13.1 is
           # titled 1.13.1. Only the title drops it -- the tag itself and every
           # asset filename keep it, because PIE matches assets on Composer's
           # pretty version, which is v-prefixed.
           title="${TAG#v}"
-          if ! gh release create "$TAG" --draft --title "$title" --notes-from-tag; then
-            # --notes-from-tag only works for annotated tags.
-            echo "::warning::--notes-from-tag failed; falling back to generated notes."
+
+          # Decided up front rather than by catching a failed --notes-from-tag:
+          # a catch-all also swallows a permissions problem, a rate limit and a
+          # 5xx, and the retry that follows would then publish a release whose
+          # notes silently differ from the tag's, announced only by a warning.
+          # An unannotated tag is the one case that genuinely has no notes to
+          # read, and `cat-file -t` names it exactly.
+          if ! tag_type="$(git cat-file -t "$TAG" 2>&1)"; then
+            echo "::error::$TAG is not in the checkout, so its release notes cannot be read: $tag_type"
+            exit 1
+          fi
+          if [ "$tag_type" = tag ]; then
+            gh release create "$TAG" --draft --title "$title" --notes-from-tag
+          else
+            echo "::warning::$TAG is a lightweight tag and carries no annotation; using generated notes."
             gh release create "$TAG" --draft --title "$title" --generate-notes
           fi
 
