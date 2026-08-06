@@ -151,13 +151,24 @@ jobs:
           if [ "$full" != true ]; then
             # The knob. A dry run is there to prove the workflow still works,
             # not to certify every ABI, and 41 assets is a lot to spend on a
-            # link fix. Dropping PHP versions is the reduction that costs no
+            # link fix. Dropping PHP versions is the reduction that costs least
             # coverage of the workflow itself: both TS modes and both Linux
             # architectures stay, because those are the legs whose steps
             # differ, and macOS (php x ts) and Windows (php-version-list) both
-            # still run. 8.4 is the version source-build already pins an image
-            # for. Widen by adding versions here, or dispatch with full-matrix.
-            php='["8.4"]'
+            # still run.
+            #
+            # The two kept are the ends of the supported range rather than one
+            # in the middle. For Linux a single version would do, since the
+            # submodule's test-bundled.yml compiles 7.2 through 8.5 on every
+            # push -- but it has no macOS job at all, and upstream's Windows
+            # job is x64/nts/8.4 only. Whatever this list omits is therefore
+            # first compiled for those platforms on a tag, where publish
+            # refuses to ship a partial release and the tag blocks on the leg
+            # with the least prior coverage. The extremes are where an ABI
+            # break shows up.
+            #
+            # Widen by adding versions here, or dispatch with full-matrix.
+            php='["8.2","8.5"]'
           fi
 
           # Every other job checks this out. On a release it is the tag, so a
@@ -421,8 +432,9 @@ jobs:
       #
       # One PHP is enough: what is being tested is the tarball's file list,
       # which does not vary by PHP version, and the Linux lane already builds
-      # every version. Same digest as that lane's 8.4 nts image.
-      IMAGE: php:8.4-cli-bookworm@sha256:8f0c382c6483a202baaad042c9ad51064f050de1093e5e8db990d055dd18534f
+      # every version. Same digest as that lane's 8.5 nts image, so this is a
+      # version the reduced pull-request matrix builds too.
+      IMAGE: php:8.5-cli-bookworm@sha256:08ff080781ceb69e81f886513b89daa830aee389abef4bdebc174737b9c0ba81
       # Same container family as the Linux lane, so the same ceiling applies.
       # See that job for why this is a separate constant rather than something
       # derived from the image.
