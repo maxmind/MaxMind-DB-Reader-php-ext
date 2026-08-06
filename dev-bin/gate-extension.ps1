@@ -54,7 +54,10 @@ function Fail([string] $Message) {
 }
 
 function Skip([string] $Message) {
-    Write-Host "The build failed $Message, so there is nothing here to gate."
+    # ::notice:: rather than Write-Host: this is the only branch in the gate
+    # that votes to pass, and the step reports success afterwards. A plain log
+    # line makes "the gate did not run" indistinguishable from "the gate ran".
+    Write-Host "::notice::The build failed $Message, so the gate had nothing to check."
     exit 0
 }
 
@@ -123,11 +126,27 @@ if ($null -ne $command) {
 } elseif ($null -ne ${env:ProgramFiles(x86)}) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (Test-Path -LiteralPath $vswhere) {
+        # Both invocations report their exit status. Neither is fatal on its
+        # own -- the first has a documented fallback and the second ends at the
+        # same Fail below -- but a vswhere that failed and a vswhere that found
+        # nothing are different facts, and without this they arrive as the same
+        # message.
+        $vswhereTrouble = @()
         $candidates = @(& $vswhere -latest -prerelease -products * -find '**\dumpbin.exe')
+        if ($LASTEXITCODE -ne 0) {
+            # -find needs vswhere 2.6; an older one errors rather than returning
+            # nothing, which is what this fallback is for.
+            $vswhereTrouble += "-find exited $LASTEXITCODE"
+            $candidates = @()
+        }
         if ($candidates.Count -eq 0) {
-            # -find needs vswhere 2.6; fall back to the documented toolset path
-            # under whichever Visual Studio vswhere reports.
+            # The documented toolset path under whichever Visual Studio vswhere
+            # reports.
             $installed = & $vswhere -latest -prerelease -products * -property installationPath
+            if ($LASTEXITCODE -ne 0) {
+                $vswhereTrouble += "-property installationPath exited $LASTEXITCODE"
+                $installed = $null
+            }
             if ($installed) {
                 $glob = Join-Path $installed 'VC\Tools\MSVC\*\bin\Host*\*\dumpbin.exe'
                 $candidates = @(Resolve-Path -Path $glob -ErrorAction SilentlyContinue |
@@ -141,7 +160,8 @@ if ($null -ne $command) {
     }
 }
 if ($null -eq $dumpbin) {
-    Fail 'Found no dumpbin.exe, so the export table cannot be read.'
+    $why = if ($vswhereTrouble.Count -gt 0) { " (vswhere: $($vswhereTrouble -join '; '))" } else { '' }
+    Fail "Found no dumpbin.exe, so the export table cannot be read.$why"
 }
 
 Write-Host "Reading exports with $dumpbin"
@@ -149,11 +169,28 @@ $exports = & $dumpbin /nologo /exports $dll
 if ($LASTEXITCODE -ne 0) {
     Fail "dumpbin could not read $dll (exit $LASTEXITCODE)."
 }
-$export = $exports | Select-String -Pattern '\bget_module\b' | Select-Object -First 1
-if ($null -eq $export) {
+# Parsed out of the ordinal/hint/RVA/name table rather than matched against all
+# of dumpbin's output. Grepping cannot tell an unreadable or empty export table
+# from a table that simply lacks the symbol, so an unmeasurable result would be
+# reported as a rejection -- the shared bash gate's header states the opposite
+# principle, that an unmeasurable result is fatal as such.
+#
+# It also removes a dependency on output the x86 legs only pass by accident:
+# there dumpbin prints "get_module = _get_module", and '\bget_module\b' matches
+# the undecorated half. Against a bare _get_module it would not match at all,
+# because _ is a word character and there is no boundary before it.
+$exportNames = @(
+    foreach ($line in $exports) {
+        if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+(\S+)') { $Matches[1] }
+    }
+)
+if ($exportNames.Count -eq 0) {
+    Fail "Read no export table from $dll, so whether it exports get_module is unverified."
+}
+Write-Host "Exports: $($exportNames -join ', ')"
+if ($exportNames -notcontains 'get_module') {
     Fail "$dll exports no get_module, so PHP would reject it as not a PHP library."
 }
-Write-Host "get_module export: $($export.Line.Trim())"
 
 # 2. Load it and query a real database, the equivalent of the Linux lane's
 #    clean-container run. `-n` so no php.ini can supply anything the DLL needs,
