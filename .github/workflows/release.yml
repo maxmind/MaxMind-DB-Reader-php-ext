@@ -363,7 +363,8 @@ jobs:
           echo "$listing"
           echo "$(wc -l <<<"$listing") entries"
 
-          fail() { echo "::error::$*"; exit 1; }
+          # shellcheck source=dev-bin/lib.sh
+          . dev-bin/lib.sh
 
           grep -qx 'config.m4' <<<"$listing" ||
             fail "config.m4 is not at the tarball root; PIE would not find the sources."

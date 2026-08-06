@@ -14,10 +14,8 @@ set -euo pipefail
 dist="$1"
 assets="$2"
 
-fail() {
-    echo "::error::$*"
-    exit 1
-}
+# shellcheck source=dev-bin/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 find "$dist" -type f | sort
 

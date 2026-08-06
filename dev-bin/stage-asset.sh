@@ -14,10 +14,8 @@ stage_dir="$2"
 os="$3"
 libc="$4"
 
-fail() {
-    echo "::error::$*"
-    exit 1
-}
+# shellcheck source=dev-bin/lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 abi="$(cat "$out_dir/php-abi")"
 ts_suffix="$(cat "$out_dir/ts-suffix")"
