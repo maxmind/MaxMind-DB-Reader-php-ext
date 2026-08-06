@@ -479,7 +479,17 @@ jobs:
           # Assert the isolation rather than trusting the base image: a system
           # libmaxminddb here would let a tarball that is missing sources link
           # against it and pass anyway.
-          if pkg-config --exists libmaxminddb 2>/dev/null; then
+          # pkg-config's own absence exits 127, which the `if` below would read
+          # as "no system libmaxminddb" -- and the 2>/dev/null this used to
+          # carry discarded the "command not found" that would have said
+          # otherwise. This is the assertion whose failure invalidates the whole
+          # job, so it is the one that should least be able to degrade from
+          # verified-absent to unmeasured.
+          if ! command -v pkg-config >/dev/null; then
+            echo "::error::pkg-config is missing, so a system libmaxminddb cannot be ruled out."
+            exit 1
+          fi
+          if pkg-config --exists libmaxminddb; then
             echo "::error::The build image has a system libmaxminddb; this job proves nothing."
             exit 1
           fi
