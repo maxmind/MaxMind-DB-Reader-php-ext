@@ -1,0 +1,37 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned `uses:` refs in release.yml current. Pinning by digest
+  # is what makes an action review-able; it is also what makes it go stale
+  # without something like this.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '14:00'
+    cooldown:
+      default-days: 7
+
+  # MaxMind-DB-Reader-php is the extension itself: its ext/ sources are what
+  # every lane compiles and what the release tarball ships. Tracking main here
+  # is deliberate -- a release bumps this pointer, and the pointer is what
+  # defines the release's contents.
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '14:00'
+    cooldown:
+      default-days: 7
+# Not covered by any ecosystem above, and so still bumped by hand:
+#
+#   - the digest-pinned php:*-cli-bookworm and php:*-zts-bookworm images, which
+#     live in a shell `case` in release.yml. Dependabot's docker ecosystem reads
+#     Dockerfiles and compose files, not image references inside a run: script.
+#   - the ubuntu:24.04 digest in the smoke job, for the same reason.
+#   - the pie.phar release URL in the smoke job, which is a plain download.
+#
+# Raising the Linux glibc floor means editing those digests, which is the point
+# of pinning them -- but nothing will remind us, so they are worth a look
+# whenever the PHP version list here changes.
