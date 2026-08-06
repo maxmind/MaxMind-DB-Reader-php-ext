@@ -39,7 +39,6 @@ jobs:
       contents: read
     outputs:
       release: ${{ steps.resolve.outputs.release }}
-      binaries: ${{ steps.resolve.outputs.binaries }}
       tag: ${{ steps.resolve.outputs.tag }}
       ext-ref: ${{ steps.resolve.outputs.ext-ref }}
       php-versions: ${{ steps.resolve.outputs.php-versions }}
@@ -62,7 +61,26 @@ jobs:
           persist-credentials: false
 
       - name: Check out the bundled libmaxminddb
-        run: git -C MaxMind-DB-Reader-php submodule update --init ext/libmaxminddb
+        run: |
+          # Every lane compiles libmaxminddb's vendored sources, so their
+          # presence is a precondition rather than a capability to detect.
+          # Asserted here because `git submodule update` on a path that is not a
+          # gitlink fails with a bare pathspec error several steps before
+          # anything explains what was wanted.
+          #
+          # The status is captured separately from the output: `set -e` is
+          # suspended inside an `if` condition, so `[ -n "$(git ...)" ]` cannot
+          # tell a git failure from an absent entry, and guessing between those
+          # two is what this message exists to avoid.
+          if ! gitlink="$(git -C MaxMind-DB-Reader-php ls-tree HEAD ext/libmaxminddb)"; then
+            echo "::error::Could not read the submodule's tree; refusing to guess whether it carries libmaxminddb."
+            exit 1
+          fi
+          if [ -z "$gitlink" ]; then
+            echo "::error::The submodule does not carry ext/libmaxminddb, which every build lane compiles."
+            exit 1
+          fi
+          git -C MaxMind-DB-Reader-php submodule update --init ext/libmaxminddb
 
       - name: Resolve the version and the build lists
         id: resolve
@@ -115,23 +133,6 @@ jobs:
             ext_ref="$(git rev-parse HEAD:MaxMind-DB-Reader-php)"
           fi
 
-          # The Linux, macOS and Windows lanes compile libmaxminddb's vendored
-          # sources, which exist only once ext/libmaxminddb is part of the
-          # submodule tree. Absence stays fatal for a release -- a release whose
-          # binaries are silently missing is worse than no release, and
-          # build-ext.sh says so -- but a pull request should not be red for a
-          # dependency that has not landed yet, so those two lanes skip instead,
-          # the same way source-build already skips. Windows cannot skip,
-          # because it is the only source of the windows-binary assets, so it
-          # falls back to linking the system library instead.
-          if [ "$release" = true ] ||
-            [ -n "$(git -C MaxMind-DB-Reader-php ls-tree HEAD ext/libmaxminddb)" ]; then
-            binaries=true
-          else
-            binaries=false
-            echo "::warning::The submodule carries no libmaxminddb sources; skipping the Linux and macOS lanes."
-          fi
-
           # Single source of truth for every lane's matrix *and* for the
           # asset-count assertion, so the two cannot drift.
           php='["8.2","8.3","8.4","8.5"]'
@@ -172,10 +173,9 @@ jobs:
             exit 1
           fi
 
-          echo "Building $TAG (release=$release, binaries=$binaries, full matrix=$full, libmaxminddb $mmdb_version)."
+          echo "Building $TAG (release=$release, full matrix=$full, libmaxminddb $mmdb_version)."
           {
             echo "release=$release"
-            echo "binaries=$binaries"
             echo "tag=$TAG"
             echo "ext-ref=$ext_ref"
             echo "php-versions=$php"
@@ -327,20 +327,18 @@ jobs:
             fail "The tarball contains libmaxminddb's tests or CI configuration."
           fi
 
-          # Once the --with-maxminddb-bundled PR lands, ext/libmaxminddb/ is
-          # part of the submodule tree and what config.m4 compiles from it must
-          # end up in the tarball too, along with the license and notice that
-          # redistributing those sources obliges us to carry.
-          if grep -q '^libmaxminddb/' <<<"$listing"; then
-            for member in libmaxminddb/src/maxminddb.c libmaxminddb/include/maxminddb.h \
-              libmaxminddb/LICENSE libmaxminddb/NOTICE; do
-              grep -qx "$member" <<<"$listing" ||
-                fail "libmaxminddb/ is in the tarball but $member is missing."
-            done
-            echo "Bundled libmaxminddb sources are present."
-          else
-            echo "::warning::No bundled libmaxminddb sources in the submodule yet."
-          fi
+          # Everything config.m4 compiles out of ext/libmaxminddb has to reach
+          # the tarball, along with the license and notice that redistributing
+          # those sources obliges us to carry. setup has already refused to run
+          # without them, so absence here is a packaging fault rather than a
+          # state to tolerate.
+          for member in libmaxminddb/src/maxminddb.c libmaxminddb/src/data-pool.c \
+            libmaxminddb/include/maxminddb.h bundled-include/maxminddb_config.h \
+            libmaxminddb/LICENSE libmaxminddb/NOTICE; do
+            grep -qx "$member" <<<"$listing" ||
+              fail "$member is missing from the tarball; a source build would fail on it."
+          done
+          echo "Bundled libmaxminddb sources are present."
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -386,13 +384,8 @@ jobs:
           path: ${{ runner.temp }}/artifact
 
       - name: Extract the tarball into an empty directory
-        id: extract
         env:
           TAG: ${{ needs.setup.outputs.tag }}
-          # setup sets this when there were bundled sources to build -- always
-          # on a release. It is the oracle for whether the tarball is *supposed*
-          # to carry libmaxminddb, which the tarball itself cannot answer.
-          BINARIES: ${{ needs.setup.outputs.binaries }}
         run: |
           tarball="$RUNNER_TEMP/artifact/maxminddb-${TAG}.tgz"
           if [ ! -f "$tarball" ]; then
@@ -415,27 +408,16 @@ jobs:
             exit 1
           fi
 
-          # Until ext/libmaxminddb is part of the submodule tree the tarball
-          # carries no libmaxminddb sources at all and a bundled build is
-          # impossible, so warn and skip rather than fail -- the same way the
-          # source-tarball verification warns.
-          #
-          # But only when there was nothing to package. Once setup says there
-          # was -- which it always does on a release -- a tarball missing those
-          # sources is the exact defect this job exists to catch, and skipping
-          # on it would turn the test off precisely when it would have failed.
-          if [ -f "$src/libmaxminddb/src/maxminddb.c" ]; then
-            echo "bundled=true" >> "$GITHUB_OUTPUT"
-          elif [ "$BINARIES" = true ]; then
+          # A tarball missing these is the exact defect this job exists to
+          # catch, so it fails rather than skipping. Skipping on the condition
+          # under which the build would break turns the test off precisely when
+          # it would have fired.
+          if [ ! -f "$src/libmaxminddb/src/maxminddb.c" ]; then
             echo "::error::The submodule carries libmaxminddb but the tarball does not; the packaging step dropped it."
             exit 1
-          else
-            echo "bundled=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::The tarball carries no libmaxminddb sources; skipping the source build."
           fi
 
       - name: Build from the tarball alone
-        if: steps.extract.outputs.bundled == 'true'
         run: |
           cat > "$RUNNER_TEMP/build.sh" <<'BUILD'
           set -euo pipefail
@@ -468,7 +450,6 @@ jobs:
             "$IMAGE" bash /build.sh
 
       - name: Load and query the object built from the tarball
-        if: steps.extract.outputs.bundled == 'true'
         env:
           MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
         run: |
@@ -484,7 +465,6 @@ jobs:
 
   linux:
     name: Linux ${{ matrix.arch }} PHP ${{ matrix.php-version }} ${{ matrix.ts }}
-    if: needs.setup.outputs.binaries == 'true'
     needs: [setup]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -595,7 +575,6 @@ jobs:
 
   macos:
     name: macOS arm64 PHP ${{ matrix.php-version }} ${{ matrix.ts }}
-    if: needs.setup.outputs.binaries == 'true'
     needs: [setup]
     # macos-14 is the oldest arm64 image GitHub offers. There is no container
     # equivalent of the Linux glibc pin on macOS, so the floor is set by
@@ -743,8 +722,7 @@ jobs:
           # those sources, fall back to fetching that library, which needs
           # config.w32 to accept the lib-prefixed name the archive actually
           # ships (maxmind/MaxMind-DB-Reader-php#263).
-          args: ${{ needs.setup.outputs.binaries == 'true' && '--with-maxminddb --with-maxminddb-bundled' || '--with-maxminddb' }}
-          libs: ${{ needs.setup.outputs.binaries != 'true' && 'maxminddb' || '' }}
+          args: --with-maxminddb --with-maxminddb-bundled
         # The action stages its own artifact; PIE resolves Windows assets
         # through a separate windows-binary mechanism with its own name format,
         # which php/php-windows-builder produces by default.
@@ -812,7 +790,6 @@ jobs:
       - name: Collect assets and assert the expected count
         env:
           TAG: ${{ needs.setup.outputs.tag }}
-          BINARIES: ${{ needs.setup.outputs.binaries }}
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
@@ -849,7 +826,6 @@ jobs:
       - name: Collect assets and assert the expected count
         env:
           TAG: ${{ needs.setup.outputs.tag }}
-          BINARIES: ${{ needs.setup.outputs.binaries }}
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}

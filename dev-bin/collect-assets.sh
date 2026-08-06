@@ -7,7 +7,7 @@
 #
 # Usage: collect-assets.sh <dist-dir> <assets-dir>
 #
-# Reads TAG, BINARIES, PHP_VERSIONS, TS_MODES, LINUX_ARCHES and WINDOWS_COUNT.
+# Reads TAG, PHP_VERSIONS, TS_MODES, LINUX_ARCHES and WINDOWS_COUNT.
 
 set -euo pipefail
 
@@ -35,18 +35,14 @@ collected="$(find "$assets" -maxdepth 1 -type f | wc -l)"
 php_count="$(jq 'length' <<<"$PHP_VERSIONS")"
 ts_count="$(jq 'length' <<<"$TS_MODES")"
 arch_count="$(jq 'length' <<<"$LINUX_ARCHES")"
-if [ "$BINARIES" = true ]; then
-    # Linux (php x ts x arch) + macOS (php x ts).
-    binary_count=$((php_count * ts_count * arch_count + php_count * ts_count))
-else
-    # Those two lanes were skipped for want of bundled libmaxminddb sources, so
-    # expect none of their assets. setup only allows this on a non-release run.
-    binary_count=0
-fi
+# Linux (php x ts x arch) + macOS (php x ts).
+binary_count=$((php_count * ts_count * arch_count + php_count * ts_count))
+
 # 1 source tarball + the binary lanes + whatever the Windows matrix said it
-# would produce. Every term comes from setup, which is also what each matrix
-# expands, so the expectation cannot drift from what was built -- including when
-# setup hands out the reduced pull-request lists or skips the binary lanes.
+# would produce. Everything but WINDOWS_COUNT comes from setup, which is also
+# what each matrix expands, so the expectation cannot drift from what was built
+# -- including when setup hands out the reduced pull-request lists. WINDOWS_COUNT
+# comes from windows-matrix, which derives it from the matrix it emits.
 expected=$((1 + binary_count + WINDOWS_COUNT))
 
 echo "Expecting $expected assets, found $collected:"
