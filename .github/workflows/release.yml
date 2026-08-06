@@ -422,6 +422,10 @@ jobs:
       # which does not vary by PHP version, and the Linux lane already builds
       # every version. Same digest as that lane's 8.4 nts image.
       IMAGE: php:8.4-cli-bookworm@sha256:8f0c382c6483a202baaad042c9ad51064f050de1093e5e8db990d055dd18534f
+      # Same container family as the Linux lane, so the same ceiling applies.
+      # See that job for why this is a separate constant rather than something
+      # derived from the image.
+      MAX_GLIBC: "2.36"
     steps:
       # Only for the submodule's verify-extension.php and the test database in
       # step. The build below mounts the extraction directory and nothing else,
@@ -513,6 +517,18 @@ jobs:
             -v "$RUNNER_TEMP/build.sh:/build.sh:ro" \
             -e HOME=/tmp \
             "$IMAGE" bash /build.sh
+
+      - name: Gate the object built from the tarball
+        # The object every platform without a prebuilt binary ends up with was
+        # the only one in the pipeline held to no self-containment bar: no
+        # RUNPATH check, no exported-MMDB_ check, no dependency allowlist and no
+        # glibc floor. The load check below passes regardless of all four, and
+        # config.m4's -fvisibility=hidden and its bundled include path are
+        # exactly what a wrong tarball member list would disturb.
+        #
+        # /src is mounted from the runner, so the build's output is readable
+        # here and the gate needs nothing the runner does not already have.
+        run: MaxMind-DB-Reader-php/dev-bin/gate-extension.sh "$RUNNER_TEMP/src/modules/maxminddb.so"
 
       - name: Load and query the object built from the tarball
         env:
