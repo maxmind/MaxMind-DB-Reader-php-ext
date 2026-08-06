@@ -1,6 +1,8 @@
 #!/usr/bin/env pwsh
 #
-# The Windows half of dev-bin/gate-extension.sh: refuse to publish a
+# The Windows half of MaxMind-DB-Reader-php/dev-bin/gate-extension.sh -- in the
+# submodule, not beside this file, which has no .sh counterpart: refuse to
+# publish a
 # php_maxminddb.dll that PHP will not load. Written in PowerShell rather than
 # added to the bash gate because nothing it uses -- dumpbin, the PHP the build
 # downloaded -- exists on the Unix lanes, and nothing the bash gate uses exists
@@ -22,12 +24,30 @@
 # rejected, which is the whole reason to run on a failed build: the failure is
 # often a symptom of the defect rather than a reason not to look for it.
 #
-# There is deliberately no Windows analogue of the .so's libmaxminddb NEEDED
-# check. The libmaxminddb that PHP publishes for Windows is a static
-# libmaxminddb.lib with no DLL beside it, so the extension carries no
-# libmaxminddb import whether it was built from the bundled sources or against
-# the fetched library, and an assertion that always holds would tell us nothing
-# about which one we built.
+# The bash gate runs five checks and this runs two. The asymmetry is deliberate,
+# so all five are accounted for here rather than left to be reconstructed:
+#
+#   - get_module is exported                 -- checked below, and the whole
+#                                               reason this file exists.
+#   - loads and queries a real database      -- checked below.
+#   - no undefined symbols                   -- not applicable. A DLL cannot
+#                                               link with unresolved imports,
+#                                               so there is nothing to measure.
+#   - no libmaxminddb in the imports         -- not applicable. The
+#                                               libmaxminddb PHP publishes for
+#                                               Windows is a static .lib with no
+#                                               DLL beside it, so the import is
+#                                               absent whether we built the
+#                                               bundled sources or linked the
+#                                               fetched library. An assertion
+#                                               that always holds would say
+#                                               nothing about which we built.
+#   - nothing but get_module is exported     -- not checked. MSVC exports only
+#                                               what is marked dllexport, so
+#                                               this holds by construction --
+#                                               though the export table read
+#                                               below would make asserting it
+#                                               nearly free.
 
 param(
     [Parameter(Mandatory = $true, Position = 0, HelpMessage = 'Directory the extension was built in')]

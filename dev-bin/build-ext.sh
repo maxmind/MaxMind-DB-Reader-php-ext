@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
 # Build maxminddb.so from the submodule's ext/ sources and record the fields the
-# published asset name is derived from. Used by both release lanes: on Linux
-# inside a digest-pinned container, on macOS directly on the runner.
+# published asset name is derived from. Used by both Unix lanes: on Linux inside
+# a digest-pinned container, on macOS directly on the runner. Windows builds
+# through php/php-windows-builder and does not run this.
 #
 # Usage: build-ext.sh <ext-dir> <out-dir>
 
@@ -12,11 +13,14 @@ ext_dir="$1"
 out_dir="$2"
 
 # --with-maxminddb-bundled compiles libmaxminddb's vendored sources into the
-# extension so the published .so needs nothing but libc. Without those sources
-# ./configure silently falls back to looking for a system library and we would
-# ship a binary with a dangling libmaxminddb dependency, so stop here instead.
+# extension so the published .so needs nothing but libc. config.m4 does refuse
+# this itself -- AC_MSG_ERROR on both a missing --with-maxminddb and missing
+# sources -- so this is not the only thing standing between us and a binary with
+# a dangling libmaxminddb dependency. It is worth keeping because it fires
+# before phpize and says so as a GitHub annotation rather than in autoconf
+# output partway down a job log.
 if [ ! -f "$ext_dir/libmaxminddb/src/maxminddb.c" ]; then
-    echo "::error::$ext_dir/libmaxminddb is missing. The submodule must point at a tag that supports --with-maxminddb-bundled."
+    echo "::error::$ext_dir/libmaxminddb is missing. The submodule must point at a commit that supports --with-maxminddb-bundled."
     exit 1
 fi
 

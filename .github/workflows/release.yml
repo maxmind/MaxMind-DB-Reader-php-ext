@@ -333,11 +333,12 @@ jobs:
           # redistribution to carry the NOTICE content it publishes.
           #
           # One member deliberately comes from outside ext/: the extension's
-          # own LICENSE, which sits at the repository root a level up. A source
-          # distribution has to carry its own Apache-2.0 licence and not only
-          # its dependency's, so tar appends it with `-C ..` and it lands flat
-          # at the archive root like everything else. MaxMind-DB-Reader-php
-          # publishes no NOTICE of its own.
+          # own LICENSE. tar runs from MaxMind-DB-Reader-php/ext, so the `-C ..`
+          # below is the *submodule's* root -- MaxMind-DB-Reader-php/LICENSE,
+          # not this repository's, which also has one. A source distribution has
+          # to carry its own Apache-2.0 licence and not only its dependency's,
+          # and it lands flat at the archive root like everything else.
+          # MaxMind-DB-Reader-php publishes no NOTICE of its own.
           #
           # An inline `run:` gets GitHub's default `bash -e {0}` -- no pipefail
           # -- and the member list is generated on the left of a pipe. Without
@@ -572,6 +573,14 @@ jobs:
         include:
           # arm64 is built on a native ARM runner. A qemu build would be slow
           # and would not exercise the hardware users actually run on.
+          #
+          # These annotate existing rows rather than adding any, but only
+          # because linux-arches always holds both values. An include: entry
+          # whose values match no combination *adds* a leg, so narrowing that
+          # list to one arch would create a phantom row with no php-version or
+          # ts -- and collect-assets.sh computes its expectation as a product,
+          # which does not model added rows. Narrow it and fix the arithmetic
+          # together.
           - arch: x86_64
             runner: ubuntu-24.04
           - arch: arm64
@@ -688,7 +697,14 @@ jobs:
           php-version: ${{ matrix.php-version }}
           tools: phpize
         env:
-          # setup-php builds thread-safe PHP when asked; nts is its default.
+          # setup-php installs a prebuilt thread-safe PHP from the shivammathur
+          # tap when asked; nts is its default. Nothing is compiled here.
+          #
+          # setup-php documents this variable's values as ts and nts rather
+          # than zts and nts, so a "zts" it does not recognise would silently
+          # yield an NTS build. stage-asset.sh catches that: it compares the
+          # ZEND_THREAD_SAFE the built PHP reports against the matrix leg and
+          # refuses to stage on disagreement.
           phpts: ${{ matrix.ts }}
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -855,19 +871,20 @@ jobs:
       # job, and neither verify-assets nor publish runs when a build lane
       # failed, so nothing this rejects can reach a release.
       #
-      # The build itself does not notice an extension PHP cannot load: the phpt
-      # suite skips 001 and 002 on !extension_loaded('maxminddb') and only 003
-      # fails, which is how a DLL with no get_module export was published as
-      # 2 skipped, 1 failed.
+      # On Windows this is the *only* signal that the extension loads. All
+      # three phpt files skip there -- 001 and 002 on
+      # !extension_loaded('maxminddb'), and 003 on a Windows SKIPIF the
+      # submodule added because both its paths are POSIX-specific -- so
+      # run-tests.php reports 3 skipped, 0 failed and exits 0 for a DLL that
+      # PHP cannot load at all. The submodule's own comment on that SKIPIF says
+      # as much: it gives up the property that one test fails, which is why the
+      # Windows job has to gate the DLL explicitly.
       #
-      # Runs even when the build reports failure, because that is the case it
-      # was written for and the one case it had never seen: when the object
-      # collision was reintroduced, the build failed on that same 003 and this
-      # step was skipped, so the gate sat out the only run that ever produced
-      # the defect it exists to name. A build can fail and still leave a DLL
-      # worth an opinion, and "the DLL exports no get_module" is the diagnosis;
-      # "1 failed" is a symptom. -BuildFailed keeps a build that died before
-      # linking from being reported as a gate failure -- see the script.
+      # That is also why this runs when the build reports failure. A build can
+      # fail and still leave a DLL worth an opinion, and "the DLL exports no
+      # get_module" is a diagnosis where a build log is a symptom.
+      # -BuildFailed keeps a build that died before linking from being reported
+      # as a gate failure -- see the script.
       #
       # Tested against 'success' rather than 'failure' so that a *skipped* build
       # counts too: a checkout that fails leaves the build unrun, which is no
@@ -1054,7 +1071,11 @@ jobs:
           curl -fsSL --output /usr/local/bin/pie \
             https://github.com/php/pie/releases/download/1.4.9/pie.phar
           chmod +x /usr/local/bin/pie
-          # Non-Windows prebuilt binaries need PIE >= 1.4.0.
+          # 1.4.9 because non-Windows prebuilt binaries need PIE >= 1.4.0; the
+          # constraint is satisfied by that pin, not by the print below, which
+          # is only for the log. Pinned by release tag rather than by digest,
+          # unlike every action and image here -- the blast radius is this
+          # smoke test.
           pie --version
 
           # Packagist can lag a tag push by a minute or two.
