@@ -12,9 +12,25 @@ Precompiled binaries for common platforms are attached to each release, so on
 those platforms no compiler or library headers are needed. Elsewhere PIE falls
 back to building the extension from source.
 
+**PIE 1.4.0 or later is required.** Earlier versions do not understand a
+package that offers both a precompiled binary and a source fallback, and they
+do not all fail clearly about it: 1.3.8 through 1.3.13 quietly fetch an archive
+that contains no C sources, so the build fails with nothing pointing at the
+cause. Check with `pie --version`.
+
 ## Prerequisites
 
-When building from source, the extension requires the libmaxminddb C library:
+None on the platforms with a precompiled binary — that is the point of them.
+
+When building from source, the extension needs libmaxminddb. It can compile the
+copy vendored in the source archive, which is what the precompiled binaries are
+built from and what CI tests:
+
+```bash
+pie install maxmind-db/reader-ext --with-maxminddb-bundled
+```
+
+Otherwise it links the libmaxminddb installed on the system:
 
 ### Ubuntu/Debian
 ```bash

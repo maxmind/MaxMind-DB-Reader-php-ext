@@ -29,6 +29,10 @@
       {
         "name": "with-maxminddb",
         "description": "Enable MaxMind DB Reader extension support"
+      },
+      {
+        "name": "with-maxminddb-bundled",
+        "description": "Build the bundled libmaxminddb sources into the extension instead of linking a system library"
       }
     ]
   }
