@@ -879,6 +879,32 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.setup.outputs.tag }}
         run: |
+          # "Never stage onto a published release" is asserted in draft-release,
+          # which is a different job. Re-running only this one reuses that job's
+          # previous result as success without re-executing it, so after a
+          # successful publish the assertion is not in force and `--clobber`
+          # would replace bytes under a tag users may already have installed.
+          # Two lines, in the job that actually holds contents: write.
+          #
+          # Captured rather than tested inline so a failed call is not reported
+          # as a published release: both refuse to upload, which is the safe
+          # direction, but only one of them is true.
+          if ! is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"; then
+            echo "::error::Could not read the state of release $TAG; refusing to upload."
+            exit 1
+          fi
+          if [ "$is_draft" != true ]; then
+            echo "::error::Release $TAG is no longer a draft; refusing to overwrite a published release."
+            exit 1
+          fi
+
+          # The member list is generated on the left of a pipe and an inline
+          # `run:` gets GitHub's default `bash -e {0}` -- no pipefail -- so a
+          # find that dies partway would upload a subset while xargs exited 0.
+          # The step would go green, attestation would then cover the complete
+          # local assets/ while the release carried less than that, and the next
+          # step would publish it.
+          set -o pipefail
           find assets -maxdepth 1 -type f -print0 \
             | xargs -0 gh release upload "$TAG" --clobber
 
