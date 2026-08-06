@@ -32,6 +32,16 @@ collected="$(find "$assets" -maxdepth 1 -type f | wc -l)"
 [ "$staged" -eq "$collected" ] ||
     fail "Two artifacts contain the same filename ($staged staged, $collected collected)."
 
+# set -u does not fire on a set-but-empty variable, and arithmetic coerces one
+# to 0 -- so an empty WINDOWS_COUNT would quietly mean "expect no Windows
+# assets", and a release missing all of them would match the expectation and
+# ship. Require a count before using it as one.
+case "${WINDOWS_COUNT:-}" in
+'' | *[!0-9]*)
+    fail "WINDOWS_COUNT is '${WINDOWS_COUNT:-}', which is not a count."
+    ;;
+esac
+
 php_count="$(jq 'length' <<<"$PHP_VERSIONS")"
 ts_count="$(jq 'length' <<<"$TS_MODES")"
 arch_count="$(jq 'length' <<<"$LINUX_ARCHES")"

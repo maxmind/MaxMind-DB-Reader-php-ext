@@ -118,7 +118,9 @@ jobs:
           # The tag is interpolated into asset filenames, so constrain it to
           # characters that are safe there before anything else uses it. The
           # stand-in version goes through this too rather than around it.
-          if [[ ! "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]; then
+          # The trailing class excludes the separators: a truncated SHA would
+          # otherwise yield "v0.0.0-" and pass.
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9]([A-Za-z0-9._+-]*[A-Za-z0-9])?$ ]]; then
             echo "::error::Refusing to build: tag '$TAG' is not a safe filename component."
             exit 1
           fi
@@ -168,8 +170,12 @@ jobs:
           # that never reached the compiler as well as a stale bump.
           mmdb_version="$(sed -n 's/^AC_INIT(\[libmaxminddb\], \[\([^]]*\)\].*/\1/p' \
             MaxMind-DB-Reader-php/ext/libmaxminddb/configure.ac)"
-          if [ -z "$mmdb_version" ]; then
-            echo "::error::Could not read the libmaxminddb version from the submodule."
+          # Scraped out of the submodule's configure.ac and then passed to a
+          # build and a gate, so it gets the same treatment as TAG rather than
+          # only an emptiness check: a pull request can move the submodule
+          # pointer, and AC_INIT is free text until something constrains it.
+          if [[ ! "$mmdb_version" =~ ^[A-Za-z0-9]([A-Za-z0-9._+-]*[A-Za-z0-9])?$ ]]; then
+            echo "::error::Could not read a usable libmaxminddb version from the submodule; got '$mmdb_version'."
             exit 1
           fi
 
@@ -715,7 +721,18 @@ jobs:
           MATRIX: ${{ steps.matrix.outputs.matrix }}
         run: |
           count="$(jq 'if type == "array" then length else (.include | length) end' <<<"$MATRIX")"
-          if [ -z "$count" ] || [ "$count" -lt 1 ]; then
+          # Shape before magnitude: `set -e` is suspended inside an `if`, so
+          # `[ "$count" -lt 1 ]` on a non-integer exits 2 and makes the whole
+          # condition false -- the guard passes and collect-assets.sh then
+          # coerces the value to 0, silently dropping the Windows legs from the
+          # expected asset count.
+          case "$count" in
+            '' | *[!0-9]*)
+              echo "::error::Could not count the Windows matrix; jq returned '$count'."
+              exit 1
+              ;;
+          esac
+          if [ "$count" -lt 1 ]; then
             echo "::error::The Windows matrix is empty."
             exit 1
           fi
@@ -794,11 +811,18 @@ jobs:
       - name: Gate the built DLL
         if: ${{ !cancelled() }}
         shell: pwsh
+        env:
+          # Routed through env: like every other job's matrix and needs values.
+          # Interpolating them into the body put the only two unvalidated
+          # expansions in the file on a pwsh command line, and made the switch
+          # positional -- an empty version would have shifted -BuildFailed into
+          # the mandatory $ExpectedVersion slot.
+          MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
+          BUILD_FAILED: ${{ steps.build.outcome != 'success' }}
         run: >-
           ./dev-bin/gate-extension.ps1 ext MaxMind-DB-Reader-php/dev-bin/verify-extension.php
           MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb
-          ${{ needs.setup.outputs.mmdb-version }}
-          ${{ steps.build.outcome != 'success' && '-BuildFailed' || '' }}
+          $env:MMDB_VERSION -BuildFailed:($env:BUILD_FAILED -eq 'true')
 
   verify-assets:
     name: Verify the staged assets
