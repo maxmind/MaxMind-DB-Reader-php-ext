@@ -125,15 +125,23 @@ jobs:
             exit 1
           fi
 
-          # The Windows lane builds maxmind/MaxMind-DB-Reader-php directly
-          # rather than this repository's checkout of it, and no tag of that
-          # name exists there on a dry run, so point it at the exact commit the
-          # submodule -- and therefore every other lane -- builds.
-          if [ "$release" = true ]; then
-            ext_ref="$TAG"
-          else
-            ext_ref="$(git rev-parse HEAD:MaxMind-DB-Reader-php)"
-          fi
+          # The Windows lane builds maxmind/MaxMind-DB-Reader-php directly --
+          # a different repository from this packaging shim -- so it needs a ref
+          # there rather than a checkout here. The submodule pointer is that
+          # ref on every run, including a release.
+          #
+          # It used to be the tag on a release, which meant the Windows assets
+          # came from upstream's $TAG while Linux, macOS and the tarball came
+          # from the submodule pointer, with nothing asserting the two were the
+          # same commit. They agree only if the releaser happened to tag
+          # upstream at exactly the pointer, and the MMDB_VERSION check cannot
+          # notice when they do not: it compares libmaxminddb's PACKAGE_VERSION,
+          # not the extension's own C sources. This is the same "mixture
+          # published under the tag's name" the checkout_ref below fixed.
+          #
+          # The submodule pointer is also the better answer on its own terms --
+          # it is what this repository says the release contains.
+          ext_ref="$(git rev-parse HEAD:MaxMind-DB-Reader-php)"
 
           # Single source of truth for every lane's matrix *and* for the
           # asset-count assertion, so the two cannot drift.
