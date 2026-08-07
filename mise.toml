@@ -4,6 +4,18 @@ lockfile = true
 [tools]
 lychee = "latest"
 
+# Used by release.yml's smoke job, which runs it inside a container with no
+# compiler to prove PIE can install a prebuilt asset.
+#
+# asset_pattern because that release also ships pie-Linux-X64 and friends, which
+# platform autodetection would prefer -- and those are static binaries with a
+# PHP of their own. `pie install` has to target the PHP the user is installing
+# into, so the phar, run by that PHP, is the only asset that tests the right
+# thing. It is also why every platform in mise.lock resolves to one file.
+[tools."github:php/pie"]
+version = "latest"
+asset_pattern = "pie.phar"
+
 [tasks.check-links]
 description = "Check links with lychee"
 run = "lychee --no-progress './**/*.md' './*.c'"

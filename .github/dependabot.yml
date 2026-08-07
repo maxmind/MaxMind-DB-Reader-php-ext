@@ -30,8 +30,13 @@ updates:
 #     live in a shell `case` in release.yml. Dependabot's docker ecosystem reads
 #     Dockerfiles and compose files, not image references inside a run: script.
 #   - the ubuntu:24.04 digest in the smoke job, for the same reason.
-#   - the pie.phar release URL in the smoke job, which is a plain download.
 #
 # Raising the Linux glibc floor means editing those digests, which is the point
 # of pinning them -- but nothing will remind us, so they are worth a look
 # whenever the PHP version list here changes.
+#
+# pie is not on that list: it is a mise tool, pinned and checksummed in
+# mise.lock. Dependabot has no mise ecosystem, so nothing bumps it until the
+# planned move to Renovate, whose mise manager understands the github: backend
+# -- and which could take the image digests above too, through a regex manager,
+# which is not something Dependabot can be configured into doing.

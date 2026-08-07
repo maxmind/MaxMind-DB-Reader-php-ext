@@ -1067,6 +1067,31 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # pie is a dependency like any other, so mise manages it: mise.lock
+      # records the sha256 and mise verifies GitHub's artifact attestations on
+      # download. It runs here on the runner, never inside the container --
+      # only the phar crosses over, so the image below stays exactly as bare as
+      # it was.
+      - name: Setup mise
+        uses: jdx/mise-action@6d1e696aa24c1aa1bcc1adea0212707c71ab78a8 # v3.6.1
+        with:
+          install: false
+          # This action caches its tool directory by default, and a workflow
+          # that publishes release artifacts is the wrong place for a cache
+          # anything else can write to. mise.lock's checksum would catch a
+          # substituted phar, but not needing to rely on that is cheaper than
+          # re-downloading 7MB. links.yml keeps the cache; it publishes
+          # nothing.
+          cache: false
+
+      - name: Install pie
+        env:
+          MISE_AUTO_INSTALL: "false"
+          # The github backend queries the API; the default token keeps this
+          # off the unauthenticated rate limit on a release run.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: mise install "github:php/pie"
+
       - name: pie install in a container with no compiler
         env:
           TAG: ${{ needs.setup.outputs.tag }}
@@ -1082,9 +1107,11 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -qq
           # php-zip is what PIE unpacks the asset with; mbstring and curl are
-          # for PIE itself. None of these pull in a compiler or autotools.
+          # for PIE itself. None of these pull in a compiler or autotools, and
+          # the curl *binary* is deliberately not among them -- it was only ever
+          # here to fetch pie, which now arrives mounted.
           apt-get install -y -qq --no-install-recommends \
-            ca-certificates curl \
+            ca-certificates \
             php8.3-cli php8.3-zip php8.3-mbstring php8.3-curl
           for tool in cc gcc g++ make phpize; do
             if command -v "$tool" >/dev/null; then
@@ -1093,15 +1120,24 @@ jobs:
             fi
           done
 
-          curl -fsSL --output /usr/local/bin/pie \
-            https://github.com/php/pie/releases/download/1.4.9/pie.phar
-          chmod +x /usr/local/bin/pie
-          # 1.4.9 because non-Windows prebuilt binaries need PIE >= 1.4.0; the
-          # constraint is satisfied by that pin, not by the print below, which
-          # is only for the log. Pinned by release tag rather than by digest,
-          # unlike every action and image here -- the blast radius is this
-          # smoke test.
-          pie --version
+          # Run the phar with the container's own PHP rather than one of pie's
+          # platform binaries, which bundle a PHP of their own: `pie install`
+          # has to target the PHP a user would be installing into, and that is
+          # the one in here.
+          pie() { php /work/pie.phar "$@"; }
+
+          # Non-Windows prebuilt binaries need PIE >= 1.4.0. mise.lock is what
+          # holds the version, so this asserts rather than prints: it is the
+          # thing that notices if the lock is ever moved below the floor.
+          pie_version="$(pie --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+          case "$pie_version" in
+            '') echo "::error::Could not read a version from pie."; exit 1 ;;
+          esac
+          if [ "$(printf '%s\n1.4.0\n' "$pie_version" | sort -V | head -n1)" != "1.4.0" ]; then
+            echo "::error::PIE $pie_version is below 1.4.0, which prebuilt non-Windows binaries need."
+            exit 1
+          fi
+          echo "PIE $pie_version"
 
           # Packagist can lag a tag push by a minute or two.
           version="${TAG#v}"
@@ -1124,6 +1160,9 @@ jobs:
           SMOKE
 
           mkdir -p "$RUNNER_TEMP/work"
+          # Copied rather than mounted from its install path: mise leaves the
+          # phar mode 0711, which a non-root container user could not read.
+          cp "$(mise which pie.phar)" "$RUNNER_TEMP/work/pie.phar"
           cp MaxMind-DB-Reader-php/dev-bin/verify-extension.php "$RUNNER_TEMP/work/verify.php"
           cp MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb \
             "$RUNNER_TEMP/work/test.mmdb"
