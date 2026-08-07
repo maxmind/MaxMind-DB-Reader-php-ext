@@ -37,6 +37,30 @@ aarch64 | arm64) arch=arm64 ;;
 esac
 [ "$arch" = "$MATRIX_ARCH" ] || fail "Runner reports $arch but the matrix says $MATRIX_ARCH."
 
+# os and libc come from the call site rather than from the matrix, and were the
+# only name components never compared against the machine -- so a copy-paste
+# error in the workflow would publish macOS binaries named -linux-glibc. Today
+# the duplicate-filename guard in collect-assets.sh would catch that, but only
+# because the two lanes' arch strings happen to collide; a linux/musl lane would
+# end that and it is not the check's job anyway.
+case "$(uname -s)" in
+Linux) expected_os=linux ;;
+Darwin) expected_os=darwin ;;
+*) fail "Unsupported system $(uname -s)." ;;
+esac
+[ "$os" = "$expected_os" ] ||
+    fail "Runner is $(uname -s) but the asset would be named '$os'."
+
+# libc cannot be read off uname, so this asserts the pairing instead: the set of
+# libcs that can occur on each OS is small and fixed. Nothing here distinguishes
+# glibc from musl on Linux -- there is no musl lane yet, and gate-extension.sh's
+# glibc floor measurement only succeeds against glibc, which corroborates the
+# one combination we currently build.
+case "$expected_os-$libc" in
+linux-glibc | linux-musl | darwin-bsdlibc) ;;
+*) fail "'$libc' is not a libc that occurs on $expected_os." ;;
+esac
+
 # PIE's pre-packaged-binary method looks for, all lowercased:
 #   php_{ext}-{version}_php{maj.min}-{arch}-{os}-{libc}[-zts].zip
 # {version} is Composer's pretty version. Packagist reports this package as
