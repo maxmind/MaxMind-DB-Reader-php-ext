@@ -1,0 +1,1176 @@
+name: Release
+
+on:
+  # A pull request builds and gates everything and touches no release, so the
+  # workflow is exercised by the changes that break it rather than only by the
+  # next tag. No bare `push`: every branch here becomes a pull request, which
+  # would then run everything twice.
+  pull_request:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish assets for; empty for a dry run"
+        required: false
+        type: string
+      full-matrix:
+        description: "Build the full matrix on a dry run (a tag always does)"
+        required: false
+        default: false
+        type: boolean
+
+# Escalated per job: only draft-release and publish get contents: write, and
+# neither is reachable on a pull request.
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  # A superseded pull-request run is worth cancelling; a release in flight is
+  # not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  setup:
+    name: Resolve version and build lists
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.resolve.outputs.release }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      ext-ref: ${{ steps.resolve.outputs.ext-ref }}
+      php-versions: ${{ steps.resolve.outputs.php-versions }}
+      ts-modes: ${{ steps.resolve.outputs.ts-modes }}
+      linux-arches: ${{ steps.resolve.outputs.linux-arches }}
+      mmdb-version: ${{ steps.resolve.outputs.mmdb-version }}
+      checkout-ref: ${{ steps.resolve.outputs.checkout-ref }}
+    steps:
+      # One level of submodule: enough to read its pointer and to see whether
+      # its tree carries ext/libmaxminddb. Not recursive -- the only thing
+      # wanted from libmaxminddb's own contents is its version, and that one
+      # nested submodule is initialised below rather than pulling MaxMind-DB's
+      # test data with it.
+      # inputs.tag only has a value on a workflow_dispatch re-cut; empty falls
+      # back to the triggering ref, which is already the tag on a tag push.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          submodules: true
+          persist-credentials: false
+
+      - name: Check out the bundled libmaxminddb
+        run: |
+          # Every lane compiles libmaxminddb's vendored sources, so their
+          # presence is a precondition rather than a capability to detect.
+          # Asserted here because `git submodule update` on a path that is not a
+          # gitlink fails with a bare pathspec error several steps before
+          # anything explains what was wanted.
+          #
+          # The status is captured separately from the output: `set -e` is
+          # suspended inside an `if` condition, so `[ -n "$(git ...)" ]` cannot
+          # tell a git failure from an absent entry, and guessing between those
+          # two is what this message exists to avoid.
+          if ! gitlink="$(git -C MaxMind-DB-Reader-php ls-tree HEAD ext/libmaxminddb)"; then
+            echo "::error::Could not read the submodule's tree; refusing to guess whether it carries libmaxminddb."
+            exit 1
+          fi
+          if [ -z "$gitlink" ]; then
+            echo "::error::The submodule does not carry ext/libmaxminddb, which every build lane compiles."
+            exit 1
+          fi
+          git -C MaxMind-DB-Reader-php submodule update --init ext/libmaxminddb
+
+      - name: Resolve the version and the build lists
+        id: resolve
+        env:
+          # workflow_dispatch lets assets be re-cut without re-tagging; leaving
+          # it empty asks for a dry run of everything but the release itself.
+          TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+          PR: ${{ github.event.pull_request.number }}
+          FULL_MATRIX: ${{ inputs.full-matrix }}
+        run: |
+          # On a tag push inputs.tag is empty and the ref name is the tag.
+          if [ -z "$TAG" ] && [ "$GITHUB_EVENT_NAME" = push ]; then
+            TAG="$REF_NAME"
+          fi
+
+          # A tag makes this a release run: draft-release, publish and smoke
+          # become reachable and the full matrix is mandatory, since publish
+          # refuses to ship a partial release. Everything else -- every pull
+          # request, and a dispatch with no tag -- builds and gates the same
+          # assets and then stops.
+          if [ -n "$TAG" ]; then
+            release=true
+            full=true
+          else
+            release=false
+            full="${FULL_MATRIX:-false}"
+            # No tag exists, so stand in a version that cannot be mistaken for
+            # a release. It keeps the leading v because every asset name embeds
+            # this string verbatim and PIE matches on Composer's v-prefixed
+            # pretty version: the naming code must not learn a second rule.
+            TAG="v0.0.0-${PR:+pr${PR}-}${GITHUB_SHA::7}"
+          fi
+
+          # The tag is interpolated into asset filenames, so constrain it to
+          # characters that are safe there before anything else uses it. The
+          # stand-in version goes through this too rather than around it.
+          # The trailing class excludes the separators: a truncated SHA would
+          # otherwise yield "v0.0.0-" and pass.
+          if [[ ! "$TAG" =~ ^[A-Za-z0-9]([A-Za-z0-9._+-]*[A-Za-z0-9])?$ ]]; then
+            echo "::error::Refusing to build: tag '$TAG' is not a safe filename component."
+            exit 1
+          fi
+
+          # The Windows lane builds maxmind/MaxMind-DB-Reader-php directly --
+          # a different repository from this packaging shim -- so it needs a ref
+          # there rather than a checkout here. The submodule pointer is that
+          # ref on every run, including a release.
+          #
+          # It used to be the tag on a release, which meant the Windows assets
+          # came from upstream's $TAG while Linux, macOS and the tarball came
+          # from the submodule pointer, with nothing asserting the two were the
+          # same commit. They agree only if the releaser happened to tag
+          # upstream at exactly the pointer, and the MMDB_VERSION check cannot
+          # notice when they do not: it compares libmaxminddb's PACKAGE_VERSION,
+          # not the extension's own C sources. This is the same "mixture
+          # published under the tag's name" the checkout_ref below fixed.
+          #
+          # The submodule pointer is also the better answer on its own terms --
+          # it is what this repository says the release contains.
+          ext_ref="$(git rev-parse HEAD:MaxMind-DB-Reader-php)"
+
+          # Single source of truth for every lane's matrix *and* for the
+          # asset-count assertion, so the two cannot drift.
+          php='["8.2","8.3","8.4","8.5"]'
+          ts='["nts","zts"]'
+          arches='["x86_64","arm64"]'
+          if [ "$full" != true ]; then
+            # The knob. A dry run is there to prove the workflow still works,
+            # not to certify every ABI, and 41 assets is a lot to spend on a
+            # link fix. Dropping PHP versions is the reduction that costs least
+            # coverage of the workflow itself: both TS modes and both Linux
+            # architectures stay, because those are the legs whose steps
+            # differ, and macOS (php x ts) and Windows (php-version-list) both
+            # still run.
+            #
+            # The two kept are the ends of the supported range rather than one
+            # in the middle. For Linux a single version would do, since the
+            # submodule's test-bundled.yml compiles 7.2 through 8.5 on every
+            # push -- but it has no macOS job at all, and upstream's Windows
+            # job is x64/nts/8.4 only. Whatever this list omits is therefore
+            # first compiled for those platforms on a tag, where publish
+            # refuses to ship a partial release and the tag blocks on the leg
+            # with the least prior coverage. The extremes are where an ABI
+            # break shows up.
+            #
+            # Widen by adding versions here, or dispatch with full-matrix.
+            php='["8.2","8.5"]'
+          fi
+
+          # Every other job checks this out. On a release it is the tag, so a
+          # workflow_dispatch re-cut builds the tagged commit rather than
+          # whatever the dispatching branch happens to point at -- which used to
+          # mean Linux, macOS and the tarball came from the branch while Windows
+          # built the tag, and the mixture was published under the tag's name.
+          # Empty on every other run, which leaves actions/checkout on its
+          # default.
+          if [ "$release" = true ]; then
+            checkout_ref="$TAG"
+          else
+            checkout_ref=""
+          fi
+
+          # The version the bundled sources will report as MMDB_LIB_VERSION.
+          # Every load check compares against it, which catches a PACKAGE_VERSION
+          # that never reached the compiler as well as a stale bump.
+          mmdb_version="$(sed -n 's/^AC_INIT(\[libmaxminddb\], \[\([^]]*\)\].*/\1/p' \
+            MaxMind-DB-Reader-php/ext/libmaxminddb/configure.ac)"
+          # Scraped out of the submodule's configure.ac and then passed to a
+          # build and a gate, so it gets the same treatment as TAG rather than
+          # only an emptiness check: a pull request can move the submodule
+          # pointer, and AC_INIT is free text until something constrains it.
+          if [[ ! "$mmdb_version" =~ ^[A-Za-z0-9]([A-Za-z0-9._+-]*[A-Za-z0-9])?$ ]]; then
+            echo "::error::Could not read a usable libmaxminddb version from the submodule; got '$mmdb_version'."
+            exit 1
+          fi
+
+          echo "Building $TAG (release=$release, full matrix=$full, libmaxminddb $mmdb_version)."
+          {
+            echo "release=$release"
+            echo "tag=$TAG"
+            echo "ext-ref=$ext_ref"
+            echo "php-versions=$php"
+            echo "ts-modes=$ts"
+            echo "linux-arches=$arches"
+            echo "mmdb-version=$mmdb_version"
+            echo "checkout-ref=$checkout_ref"
+          } >> "$GITHUB_OUTPUT"
+
+  draft-release:
+    name: Find or create the draft release
+    if: needs.setup.outputs.release == 'true'
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the draft release
+    steps:
+      # --notes-from-tag reads the annotation out of a local clone rather than
+      # the API, so without a checkout it always fails and the notes silently
+      # become GitHub's generated commit list. This job runs only on a release,
+      # where checkout-ref is the tag, and actions/checkout fetches a tag ref
+      # into refs/tags, which is what makes the annotation readable below.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Find or create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          # Assets cannot be added to a published, immutable release, so the
+          # whole run stages onto a draft that publish flips at the very end.
+          # Finding an existing release therefore has to answer two different
+          # questions with two different mechanisms.
+          #
+          # Published: /releases/tags/{tag} returns published releases only, so
+          # any success here means published and there is nothing to inspect.
+          # A 404 is the only result that means "not there yet"; every other
+          # failure -- auth, rate limit, a 5xx -- must not be mistaken for it.
+          if gh api "repos/${GH_REPO}/releases/tags/${TAG}" >/dev/null 2>"$RUNNER_TEMP/gh.err"; then
+            echo "::error::Release $TAG exists and is already published; refusing to stage assets onto it."
+            exit 1
+          elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/gh.err"; then
+            cat "$RUNNER_TEMP/gh.err"
+            echo "::error::Could not determine whether release $TAG exists; refusing to guess."
+            exit 1
+          fi
+
+          # Draft: a draft has no git tag until it is published, so that
+          # endpoint cannot see one and 404s for it too -- which is why gh
+          # itself resolves drafts through GraphQL. Listing does see them.
+          #
+          # This matters because GitHub does not require draft tag names to be
+          # unique. Left to fall through to `gh release create`, a re-cut would
+          # add a *second* draft rather than reusing the first, and publish
+          # would then upload to one while un-drafting whichever the API
+          # happened to return.
+          if ! releases="$(gh release list --limit 100 --json tagName,isDraft)"; then
+            echo "::error::Could not list releases; refusing to guess whether a draft $TAG exists."
+            exit 1
+          fi
+          drafts="$(jq --arg tag "$TAG" '[.[] | select(.tagName == $tag and .isDraft)] | length' <<<"$releases")"
+          if [ "$drafts" -gt 1 ]; then
+            echo "::error::$drafts drafts are tagged $TAG; publish cannot tell which to ship. Delete the extras."
+            exit 1
+          fi
+          if [ "$drafts" -eq 1 ]; then
+            echo "Draft release $TAG already exists; reusing it."
+            exit 0
+          fi
+
+          # Releases here are titled without the tag's leading "v": v1.13.1 is
+          # titled 1.13.1. Only the title drops it -- the tag itself and every
+          # asset filename keep it, because PIE matches assets on Composer's
+          # pretty version, which is v-prefixed.
+          title="${TAG#v}"
+
+          # Decided up front rather than by catching a failed --notes-from-tag:
+          # a catch-all also swallows a permissions problem, a rate limit and a
+          # 5xx, and the retry that follows would then publish a release whose
+          # notes silently differ from the tag's, announced only by a warning.
+          # An unannotated tag is the one case that genuinely has no notes to
+          # read, and `cat-file -t` names it exactly.
+          if ! tag_type="$(git cat-file -t "$TAG" 2>&1)"; then
+            echo "::error::$TAG is not in the checkout, so its release notes cannot be read: $tag_type"
+            exit 1
+          fi
+          if [ "$tag_type" = tag ]; then
+            gh release create "$TAG" --draft --title "$title" --notes-from-tag
+          else
+            echo "::warning::$TAG is a lightweight tag and carries no annotation; using generated notes."
+            gh release create "$TAG" --draft --title "$title" --generate-notes
+          fi
+
+  source-tarball:
+    name: Source tarball
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build the flat source tarball
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          # This is the pre-packaged-source fallback that every platform without
+          # a prebuilt binary uses, so both the layout and the name have to keep
+          # working exactly as they do today: taring from inside ext/ puts
+          # config.m4 and its siblings at the archive root with no wrapping
+          # directory, which is where PIE looks and matches the layout of the
+          # tarballs published for this package before this workflow existed.
+          #
+          # Members are listed explicitly rather than swept up with a bare `*`
+          # glob because ext/libmaxminddb is a recursive submodule checkout: a
+          # glob publishes its .git gitfile, .github/, t/, bin/, doc/ and
+          # autotools scaffolding, plus the two MaxMind-DB test-data submodules
+          # nested under it. A source build reads only the sources config.m4
+          # compiles (libmaxminddb/src/*.c) and the headers it puts on the
+          # include path; LICENSE and NOTICE ship because those sources do --
+          # libmaxminddb is Apache-2.0 and Apache-2.0 4(d) requires a
+          # redistribution to carry the NOTICE content it publishes.
+          #
+          # One member deliberately comes from outside ext/: the extension's
+          # own LICENSE. tar runs from MaxMind-DB-Reader-php/ext, so the `-C ..`
+          # below is the *submodule's* root -- MaxMind-DB-Reader-php/LICENSE,
+          # not this repository's, which also has one. A source distribution has
+          # to carry its own Apache-2.0 licence and not only its dependency's,
+          # and it lands flat at the archive root like everything else.
+          # MaxMind-DB-Reader-php publishes no NOTICE of its own.
+          #
+          # An inline `run:` gets GitHub's default `bash -e {0}` -- no pipefail
+          # -- and the member list is generated on the left of a pipe. Without
+          # this, a `find` that fails partway through kills the group, the
+          # remaining members are never emitted, `sort` still exits 0, and the
+          # step produces a silently incomplete tarball.
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/stage"
+          tarball="$RUNNER_TEMP/stage/maxminddb-${TAG}.tgz"
+          members="$RUNNER_TEMP/members"
+          ( cd MaxMind-DB-Reader-php/ext
+            {
+              find . -mindepth 1 -maxdepth 1 ! -name libmaxminddb -printf '%P\n'
+              # Keyed on a source file config.m4 actually compiles, not on the
+              # directory: an uninitialised nested submodule leaves an empty
+              # ext/libmaxminddb behind, which `-d` would accept and which
+              # would then contribute no members at all.
+              if [ -f libmaxminddb/src/maxminddb.c ]; then
+                find libmaxminddb/src -maxdepth 1 -name '*.[ch]' -print
+                find libmaxminddb/include -maxdepth 1 -name '*.h' -print
+                echo libmaxminddb/LICENSE
+                echo libmaxminddb/NOTICE
+              fi
+            } | sort > "$members"
+            # tests/ is a directory and is still archived recursively;
+            # --verbatim-files-from keeps tar from reading a member name that
+            # starts with a dash as an option.
+            tar -czf "$tarball" --verbatim-files-from -T "$members" -C .. LICENSE )
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+
+      - name: Verify the tarball layout
+        run: |
+          listing="$(tar -tzf "$TARBALL")"
+          echo "$listing"
+          echo "$(wc -l <<<"$listing") entries"
+
+          # shellcheck source=dev-bin/lib.sh
+          . dev-bin/lib.sh
+
+          grep -qx 'config.m4' <<<"$listing" ||
+            fail "config.m4 is not at the tarball root; PIE would not find the sources."
+
+          # Appended from the repository root rather than swept up from inside
+          # ext/, so assert it landed flat here and not as ../LICENSE.
+          grep -qx 'LICENSE' <<<"$listing" ||
+            fail "The extension's own LICENSE is not at the tarball root."
+
+          # Neither the vendored checkout's own git metadata nor its test suite
+          # and CI configuration belong in a published release asset.
+          if grep -E '(^|/)\.git(/|$)' <<<"$listing"; then
+            fail "The tarball contains git metadata."
+          fi
+          if grep -E '^libmaxminddb/(t|\.github)/' <<<"$listing"; then
+            fail "The tarball contains libmaxminddb's tests or CI configuration."
+          fi
+
+          # Everything config.m4 compiles out of ext/libmaxminddb has to reach
+          # the tarball, along with the license and notice that redistributing
+          # those sources obliges us to carry. setup has already refused to run
+          # without them, so absence here is a packaging fault rather than a
+          # state to tolerate.
+          for member in libmaxminddb/src/maxminddb.c libmaxminddb/src/data-pool.c \
+            libmaxminddb/include/maxminddb.h bundled-include/maxminddb_config.h \
+            libmaxminddb/LICENSE libmaxminddb/NOTICE; do
+            grep -qx "$member" <<<"$listing" ||
+              fail "$member is missing from the tarball; a source build would fail on it."
+          done
+          echo "Bundled libmaxminddb sources are present."
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-asset-source-tarball
+          path: ${{ env.TARBALL }}
+          if-no-files-found: error
+
+  source-build:
+    name: Build from the source tarball
+    # Only source-tarball is needed, so this runs alongside the binary lanes
+    # instead of extending the critical path. publish waits for it because a
+    # tarball that cannot be built must not reach users as the
+    # pre-packaged-source fallback.
+    needs: [setup, source-tarball]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      # The binary lanes all build from the submodule tree, so a libmaxminddb
+      # reshuffle -- headers moved into a subdirectory, a new source file added
+      # -- would produce a tarball that fails only for source-installing users
+      # while every other gate stayed green. This job builds what those users
+      # actually download.
+      #
+      # One PHP is enough: what is being tested is the tarball's file list,
+      # which does not vary by PHP version, and the Linux lane already builds
+      # every version. Same digest as that lane's 8.5 nts image, so this is a
+      # version the reduced pull-request matrix builds too.
+      IMAGE: php:8.5-cli-bookworm@sha256:08ff080781ceb69e81f886513b89daa830aee389abef4bdebc174737b9c0ba81
+      # Same container family as the Linux lane, so the same ceiling applies.
+      # See that job for why this is a separate constant rather than something
+      # derived from the image.
+      MAX_GLIBC: "2.36"
+    steps:
+      # Only for the submodule's verify-extension.php and the test database in
+      # step. The build below mounts the extraction directory and nothing else,
+      # so this checkout is not reachable from the compiler.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Download the staged source tarball
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-asset-source-tarball
+          path: ${{ runner.temp }}/artifact
+
+      - name: Extract the tarball into an empty directory
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          tarball="$RUNNER_TEMP/artifact/maxminddb-${TAG}.tgz"
+          if [ ! -f "$tarball" ]; then
+            echo "::error::$tarball is missing from the staged artifact."
+            exit 1
+          fi
+
+          # A fresh directory, so what gets built is the tarball's contents and
+          # nothing else: no stray config.m4, no headers and no libmaxminddb
+          # left over from a checkout.
+          src="$RUNNER_TEMP/src"
+          rm -rf "$src"
+          mkdir -p "$src"
+          tar -xzf "$tarball" -C "$src"
+          find "$src" -mindepth 1 -maxdepth 1 -printf '%P\n' | sort
+
+          # The tarball is flat, so this is where phpize has to run.
+          if [ ! -f "$src/config.m4" ]; then
+            echo "::error::config.m4 is not at the extraction root."
+            exit 1
+          fi
+
+          # A tarball missing these is the exact defect this job exists to
+          # catch, so it fails rather than skipping. Skipping on the condition
+          # under which the build would break turns the test off precisely when
+          # it would have fired.
+          if [ ! -f "$src/libmaxminddb/src/maxminddb.c" ]; then
+            echo "::error::The submodule carries libmaxminddb but the tarball does not; the packaging step dropped it."
+            exit 1
+          fi
+
+      - name: Build from the tarball alone
+        run: |
+          cat > "$RUNNER_TEMP/build.sh" <<'BUILD'
+          set -euo pipefail
+          # Assert the isolation rather than trusting the base image: a system
+          # libmaxminddb here would let a tarball that is missing sources link
+          # against it and pass anyway.
+          # pkg-config's own absence exits 127, which the `if` below would read
+          # as "no system libmaxminddb" -- and the 2>/dev/null this used to
+          # carry discarded the "command not found" that would have said
+          # otherwise. This is the assertion whose failure invalidates the whole
+          # job, so it is the one that should least be able to degrade from
+          # verified-absent to unmeasured.
+          if ! command -v pkg-config >/dev/null; then
+            echo "::error::pkg-config is missing, so a system libmaxminddb cannot be ruled out."
+            exit 1
+          fi
+          if pkg-config --exists libmaxminddb; then
+            echo "::error::The build image has a system libmaxminddb; this job proves nothing."
+            exit 1
+          fi
+          if ls /usr/include/maxminddb.h /usr/lib/*/libmaxminddb.* /usr/local/lib/libmaxminddb.* 2>/dev/null; then
+            echo "::error::The build image has libmaxminddb headers or libraries; this job proves nothing."
+            exit 1
+          fi
+
+          cd /src
+          phpize
+          ./configure --with-maxminddb --with-maxminddb-bundled
+          make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)"
+          test -f modules/maxminddb.so
+          BUILD
+
+          # /src is the only thing mounted from the runner besides the script
+          # itself, so the workspace checkout cannot satisfy an include or a
+          # link that the tarball failed to ship.
+          docker run --rm \
+            -v "$RUNNER_TEMP/src:/src" \
+            -v "$RUNNER_TEMP/build.sh:/build.sh:ro" \
+            -e HOME=/tmp \
+            "$IMAGE" bash /build.sh
+
+      - name: Gate the object built from the tarball
+        # The object every platform without a prebuilt binary ends up with was
+        # the only one in the pipeline held to no self-containment bar: no
+        # RUNPATH check, no exported-MMDB_ check, no dependency allowlist and no
+        # glibc floor. The load check below passes regardless of all four, and
+        # config.m4's -fvisibility=hidden and its bundled include path are
+        # exactly what a wrong tarball member list would disturb.
+        #
+        # /src is mounted from the runner, so the build's output is readable
+        # here and the gate needs nothing the runner does not already have.
+        run: MaxMind-DB-Reader-php/dev-bin/gate-extension.sh "$RUNNER_TEMP/src/modules/maxminddb.so"
+
+      - name: Load and query the object built from the tarball
+        env:
+          MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
+        run: |
+          # The clean-container check the binary lanes use, pointed at the
+          # object the tarball produced: nothing mounted but the .so, the check
+          # and a test database, and `php -n` so no php.ini can supply anything.
+          docker run --rm \
+            -v "$RUNNER_TEMP/src/modules/maxminddb.so:/tmp/maxminddb.so:ro" \
+            -v "$GITHUB_WORKSPACE/MaxMind-DB-Reader-php/dev-bin/verify-extension.php:/tmp/verify.php:ro" \
+            -v "$GITHUB_WORKSPACE/MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb:/tmp/test.mmdb:ro" \
+            "$IMAGE" \
+            php -n -d extension=/tmp/maxminddb.so /tmp/verify.php /tmp/test.mmdb "$MMDB_VERSION"
+
+  linux:
+    name: Linux ${{ matrix.arch }} PHP ${{ matrix.php-version }} ${{ matrix.ts }}
+    needs: [setup]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ${{ fromJSON(needs.setup.outputs.php-versions) }}
+        ts: ${{ fromJSON(needs.setup.outputs.ts-modes) }}
+        arch: ${{ fromJSON(needs.setup.outputs.linux-arches) }}
+        include:
+          # arm64 is built on a native ARM runner. A qemu build would be slow
+          # and would not exercise the hardware users actually run on.
+          #
+          # These annotate existing rows rather than adding any, but only
+          # because linux-arches always holds both values. An include: entry
+          # whose values match no combination *adds* a leg, so narrowing that
+          # list to one arch would create a phantom row with no php-version or
+          # ts -- and collect-assets.sh computes its expectation as a product,
+          # which does not model added rows. Narrow it and fix the arithmetic
+          # together.
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      # Highest glibc symbol version a published .so is allowed to require:
+      # bookworm's, which is what the build containers below provide, so
+      # nothing built in them can exceed it. The gate asserts that rather than
+      # assuming it.
+      #
+      # If it ever fires, the build escaped the container -- do not bump the
+      # number. glibc 2.38 headers redirect the strtol that libmaxminddb calls
+      # to __isoc23_strtol@GLIBC_2.38, and PHP's -D_GNU_SOURCE enables the
+      # redirect, so the same sources measure a 2.38 floor on Ubuntu 24.04 and
+      # 2.33 against bookworm's glibc 2.36.
+      MAX_GLIBC: "2.36"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Select the digest-pinned build image
+        env:
+          PHP_VERSION: ${{ matrix.php-version }}
+          TS: ${{ matrix.ts }}
+        run: |
+          # Building inside a pinned container instead of on the runner makes
+          # the glibc floor a deliberate, reviewable choice: raising it means
+          # editing a digest here, and it cannot drift when GitHub refreshes
+          # its runner images. Debian bookworm ships glibc 2.36, so a binary
+          # built here loads on any distro with glibc >= 2.36.
+          #
+          # These are multi-arch index digests, so the same digest resolves
+          # correctly on both the amd64 and the arm64 runner.
+          case "${PHP_VERSION}-${TS}" in
+            8.2-nts) image="php:8.2-cli-bookworm@sha256:2ef1f8d3a9694dab40e45c3404fa18db37d67d3d98c4cf45c51f09bd05ec2672" ;;
+            8.3-nts) image="php:8.3-cli-bookworm@sha256:107f022053b2222ffd64f957c2a3b4c724c506301c84638e537f9027ed6468f5" ;;
+            8.4-nts) image="php:8.4-cli-bookworm@sha256:8f0c382c6483a202baaad042c9ad51064f050de1093e5e8db990d055dd18534f" ;;
+            8.5-nts) image="php:8.5-cli-bookworm@sha256:08ff080781ceb69e81f886513b89daa830aee389abef4bdebc174737b9c0ba81" ;;
+            8.2-zts) image="php:8.2-zts-bookworm@sha256:6948daa576e2a3808e52d65697195b5b2ffd599d18d1268e38123ed0b27bc54a" ;;
+            8.3-zts) image="php:8.3-zts-bookworm@sha256:bc362fc5d8105ef5494449687f6ad2943b3f01b5c41410fe12ea04d8fed25703" ;;
+            8.4-zts) image="php:8.4-zts-bookworm@sha256:1058567505382d754e61e9d3f919e5f59a6f234e29a69eb3c19c353373356f2e" ;;
+            8.5-zts) image="php:8.5-zts-bookworm@sha256:f6130a7b4539d29083b7a18aa901c0df2282ed6c9f5c93c50a68eb1f9ce8e9f1" ;;
+            *)
+              echo "::error::No pinned image for PHP ${PHP_VERSION} ${TS}."
+              exit 1
+              ;;
+          esac
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Build in the pinned container
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src" \
+            -v "$RUNNER_TEMP/out:/out" \
+            -e HOME=/tmp \
+            "$IMAGE" bash /src/dev-bin/build-ext.sh /src/MaxMind-DB-Reader-php/ext /out
+          # The container writes as root; hand the results back to the runner.
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/out" "$GITHUB_WORKSPACE/MaxMind-DB-Reader-php/ext"
+
+      - name: Gate the built object
+        run: MaxMind-DB-Reader-php/dev-bin/gate-extension.sh "$RUNNER_TEMP/out/maxminddb.so"
+
+      - name: Load and query in a clean container
+        env:
+          MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
+        run: |
+          # A fresh container with nothing mounted but the .so, the check itself
+          # and a test database: no build tree, no system libmaxminddb, and
+          # `php -n` so no php.ini can quietly supply anything. If the object
+          # needs something we did not ship, this is where it shows up.
+          docker run --rm \
+            -v "$RUNNER_TEMP/out/maxminddb.so:/tmp/maxminddb.so:ro" \
+            -v "$GITHUB_WORKSPACE/MaxMind-DB-Reader-php/dev-bin/verify-extension.php:/tmp/verify.php:ro" \
+            -v "$GITHUB_WORKSPACE/MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb:/tmp/test.mmdb:ro" \
+            "$IMAGE" \
+            php -n -d extension=/tmp/maxminddb.so /tmp/verify.php /tmp/test.mmdb "$MMDB_VERSION"
+
+      - name: Stage the asset
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          MATRIX_PHP: ${{ matrix.php-version }}
+          MATRIX_TS: ${{ matrix.ts }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: dev-bin/stage-asset.sh "$RUNNER_TEMP/out" "$RUNNER_TEMP/stage" linux glibc
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-asset-linux-${{ matrix.arch }}-php${{ matrix.php-version }}-${{ matrix.ts }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64 PHP ${{ matrix.php-version }} ${{ matrix.ts }}
+    needs: [setup]
+    # macos-14 is the oldest arm64 image GitHub offers. There is no container
+    # equivalent of the Linux glibc pin on macOS, so the floor is set by the
+    # deployment target the build step exports and asserted in the gate step.
+    runs-on: macos-14
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ${{ fromJSON(needs.setup.outputs.php-versions) }}
+        ts: ${{ fromJSON(needs.setup.outputs.ts-modes) }}
+    steps:
+      - name: Install PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ matrix.php-version }}
+          tools: phpize
+        env:
+          # setup-php installs a prebuilt thread-safe PHP from the shivammathur
+          # tap when asked; nts is its default. Nothing is compiled here.
+          #
+          # setup-php documents this variable's values as ts and nts rather
+          # than zts and nts, so a "zts" it does not recognise would silently
+          # yield an NTS build. stage-asset.sh catches that: it compares the
+          # ZEND_THREAD_SAFE the built PHP reports against the matrix leg and
+          # refuses to stage on disagreement.
+          phpts: ${{ matrix.ts }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build
+        env:
+          # What the compiler targets. arm64 macOS starts at 11.0, so this is
+          # the lowest useful floor; pinning it rather than taking the SDK
+          # default keeps it from drifting when GitHub updates the runner's
+          # Xcode.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          if ! command -v autoconf >/dev/null; then
+            brew install autoconf
+          fi
+          dev-bin/build-ext.sh MaxMind-DB-Reader-php/ext "$RUNNER_TEMP/out"
+
+      - name: Gate the built object
+        env:
+          # The ceiling the measured minos is compared against -- deliberately
+          # a second, independent declaration rather than one job-level value
+          # shared with the build above.
+          #
+          # As job-level env this was both the compiler's input and the gate's
+          # expectation, so the assertion could only fire if the toolchain had
+          # ignored the variable; it could never fire on a wrong value. Raising
+          # the build to "15.0" would have silently dropped support for macOS
+          # 11 through 14 while the gate reported a pass against its own new
+          # number.
+          #
+          # Declared twice so the two can disagree, which is the same reason
+          # MAX_GLIBC is separate from the container that sets the Linux floor.
+          # Change one and the gate says so.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: MaxMind-DB-Reader-php/dev-bin/gate-extension.sh "$RUNNER_TEMP/out/maxminddb.so"
+
+      - name: Load and query in a clean environment
+        env:
+          MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
+        run: |
+          # There is no container to isolate into on macOS, so this is `php -n`
+          # -- no php.ini at all -- with only the built object loaded.
+          php -n -d extension="$RUNNER_TEMP/out/maxminddb.so" \
+            MaxMind-DB-Reader-php/dev-bin/verify-extension.php \
+            MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb "$MMDB_VERSION"
+
+      - name: Stage the asset
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          MATRIX_PHP: ${{ matrix.php-version }}
+          MATRIX_TS: ${{ matrix.ts }}
+          # macos-14 is arm64-only; the script still cross-checks it against
+          # what the runner reports.
+          MATRIX_ARCH: arm64
+        # PIE calls the macOS libc bsdlibc.
+        run: dev-bin/stage-asset.sh "$RUNNER_TEMP/out" "$RUNNER_TEMP/stage" darwin bsdlibc
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-asset-macos-php${{ matrix.php-version }}-${{ matrix.ts }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  windows-matrix:
+    name: Windows build matrix
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.count.outputs.count }}
+    steps:
+      - name: Get the extension matrix
+        id: matrix
+        uses: php/php-windows-builder/extension-matrix@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
+        with:
+          # The C sources and config.w32 live in the main repository; this repo
+          # is only the PIE packaging shim and keeps them in a submodule, which
+          # the action's own checkout would not initialise.
+          extension-url: https://github.com/maxmind/MaxMind-DB-Reader-php
+          extension-ref: ${{ needs.setup.outputs.ext-ref }}
+          # Pinned rather than derived from composer.json so the Windows lane
+          # covers the same PHP versions as every other lane.
+          php-version-list: ${{ join(fromJSON(needs.setup.outputs.php-versions), ', ') }}
+
+      - name: Count the expected Windows assets
+        id: count
+        env:
+          MATRIX: ${{ steps.matrix.outputs.matrix }}
+        run: |
+          count="$(jq 'if type == "array" then length else (.include | length) end' <<<"$MATRIX")"
+          # Shape before magnitude: `set -e` is suspended inside an `if`, so
+          # `[ "$count" -lt 1 ]` on a non-integer exits 2 and makes the whole
+          # condition false -- the guard passes and collect-assets.sh then
+          # coerces the value to 0, silently dropping the Windows legs from the
+          # expected asset count.
+          case "$count" in
+            '' | *[!0-9]*)
+              echo "::error::Could not count the Windows matrix; jq returned '$count'."
+              exit 1
+              ;;
+          esac
+          if [ "$count" -lt 1 ]; then
+            echo "::error::The Windows matrix is empty."
+            exit 1
+          fi
+          echo "Windows will produce $count assets."
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+  windows:
+    name: Windows ${{ matrix.arch }} PHP ${{ matrix.php-version }} ${{ matrix.ts }}
+    needs: [setup, windows-matrix]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.windows-matrix.outputs.matrix) }}
+    steps:
+      # The build action clones extension-url into a build directory of its own
+      # and checks *this* repository out into the workspace when it finds no
+      # checkout there -- and its checkout would empty the workspace first, so
+      # there is no adding one afterwards. Do it here instead, which the action
+      # detects and skips, because the gate below needs dev-bin and the test
+      # database. Recursive for the database, which is a submodule of a
+      # submodule.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Build the extension
+        id: build
+        uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
+        with:
+          extension-url: https://github.com/maxmind/MaxMind-DB-Reader-php
+          extension-ref: ${{ needs.setup.outputs.ext-ref }}
+          build-directory: ext
+          php-version: ${{ matrix.php-version }}
+          arch: ${{ matrix.arch }}
+          ts: ${{ matrix.ts }}
+          # Bundled whenever the submodule carries libmaxminddb's sources, the
+          # same condition the Linux and macOS lanes gate on. The only
+          # libmaxminddb PHP publishes for Windows is 1.5.0, from January 2021,
+          # so bundling is what puts Windows on the same libmaxminddb as every
+          # other platform, and it needs no library fetched at all. Without
+          # those sources, fall back to fetching that library, which needs
+          # config.w32 to accept the lib-prefixed name the archive actually
+          # ships (maxmind/MaxMind-DB-Reader-php#263).
+          args: --with-maxminddb --with-maxminddb-bundled
+        # The action stages its own artifact; PIE resolves Windows assets
+        # through a separate windows-binary mechanism with its own name format,
+        # which php/php-windows-builder produces by default.
+
+      # What the Linux and macOS lanes get from gate-extension.sh and their
+      # load-and-query steps. Uploading the artifact is the action's own last
+      # step, so this necessarily runs after it, but a failure here fails the
+      # job, and neither verify-assets nor publish runs when a build lane
+      # failed, so nothing this rejects can reach a release.
+      #
+      # On Windows this is the *only* signal that the extension loads. All
+      # three phpt files skip there -- 001 and 002 on
+      # !extension_loaded('maxminddb'), and 003 on a Windows SKIPIF the
+      # submodule added because both its paths are POSIX-specific -- so
+      # run-tests.php reports 3 skipped, 0 failed and exits 0 for a DLL that
+      # PHP cannot load at all. The submodule's own comment on that SKIPIF says
+      # as much: it gives up the property that one test fails, which is why the
+      # Windows job has to gate the DLL explicitly.
+      #
+      # That is also why this runs when the build reports failure. A build can
+      # fail and still leave a DLL worth an opinion, and "the DLL exports no
+      # get_module" is a diagnosis where a build log is a symptom.
+      # -BuildFailed keeps a build that died before linking from being reported
+      # as a gate failure -- see the script.
+      #
+      # Tested against 'success' rather than 'failure' so that a *skipped* build
+      # counts too: a checkout that fails leaves the build unrun, which is no
+      # more the gate's news than a build that crashed.
+      - name: Gate the built DLL
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          # Routed through env: like every other job's matrix and needs values.
+          # Interpolating them into the body put the only two unvalidated
+          # expansions in the file on a pwsh command line, and made the switch
+          # positional -- an empty version would have shifted -BuildFailed into
+          # the mandatory $ExpectedVersion slot.
+          MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
+          BUILD_FAILED: ${{ steps.build.outcome != 'success' }}
+        run: >-
+          ./dev-bin/gate-extension.ps1 ext MaxMind-DB-Reader-php/dev-bin/verify-extension.php
+          MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb
+          $env:MMDB_VERSION -BuildFailed:($env:BUILD_FAILED -eq 'true')
+
+  gate-tests:
+    name: Test the Windows gate
+    # gate-extension.ps1 is the only thing standing between an unloadable DLL
+    # and a published Windows asset, and until now it was only ever observed
+    # succeeding -- the run that produced the defect it exists to name never
+    # reached it. This runs its rejection cases, and its accept case, on every
+    # pull request. verify-assets depends on it, so a gate that has stopped
+    # working blocks publication rather than waving it through.
+    #
+    # Linux, where pwsh is preinstalled: the script's dumpbin lookup goes
+    # through PATH and its load check runs whatever php.exe it found, so both
+    # are shimmable. Real dumpbin output against a real DLL stays the Windows
+    # lane's job.
+    needs: [setup]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - run: dev-bin/test-gate-extension-windows.sh
+
+  verify-assets:
+    name: Verify the staged assets
+    # The fan-in for every build lane, and the only place the asset set is
+    # checked on a run that publishes nothing. Deliberately separate from
+    # publish: the check is the most valuable thing that job does, and it needs
+    # no write permission to do it, so it runs on pull requests too.
+    #
+    # A skipped need would ordinarily skip this job as well, and the binary
+    # lanes skip whenever there are no bundled sources to build. Spell out the
+    # condition instead: a failure anywhere upstream is the only thing that
+    # should stop the assets being checked.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    needs: [setup, source-tarball, source-build, linux, macos, windows-matrix, windows, gate-tests]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      # Only for dev-bin/collect-assets.sh.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Download every staged artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+
+      - name: Collect assets and assert the expected count
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
+          TS_MODES: ${{ needs.setup.outputs.ts-modes }}
+          LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
+          WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
+        run: dev-bin/collect-assets.sh dist assets
+
+  publish:
+    name: Publish the release
+    if: needs.setup.outputs.release == 'true'
+    # The build lanes are reached through verify-assets, which is what asserted
+    # the set is complete.
+    needs: [setup, draft-release, windows-matrix, verify-assets]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # upload assets and un-draft the release
+      id-token: write # provenance signing
+      attestations: write # provenance
+    steps:
+      # Only for dev-bin/collect-assets.sh.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          persist-credentials: false
+
+      - name: Download every staged artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+
+      # Re-downloaded and re-collected rather than handed over from
+      # verify-assets: keeping contents: write out of a job that runs on pull
+      # requests is worth one repeated download, and this re-asserts the count
+      # in the same job that uploads.
+      - name: Collect assets and assert the expected count
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
+          TS_MODES: ${{ needs.setup.outputs.ts-modes }}
+          LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
+          WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
+        run: dev-bin/collect-assets.sh dist assets
+
+      - name: Upload the assets to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          # "Never stage onto a published release" is asserted in draft-release,
+          # which is a different job. Re-running only this one reuses that job's
+          # previous result as success without re-executing it, so after a
+          # successful publish the assertion is not in force and `--clobber`
+          # would replace bytes under a tag users may already have installed.
+          # Two lines, in the job that actually holds contents: write.
+          #
+          # Captured rather than tested inline so a failed call is not reported
+          # as a published release: both refuse to upload, which is the safe
+          # direction, but only one of them is true.
+          if ! is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"; then
+            echo "::error::Could not read the state of release $TAG; refusing to upload."
+            exit 1
+          fi
+          if [ "$is_draft" != true ]; then
+            echo "::error::Release $TAG is no longer a draft; refusing to overwrite a published release."
+            exit 1
+          fi
+
+          # The member list is generated on the left of a pipe and an inline
+          # `run:` gets GitHub's default `bash -e {0}` -- no pipefail -- so a
+          # find that dies partway would upload a subset while xargs exited 0.
+          # The step would go green, attestation would then cover the complete
+          # local assets/ while the release carried less than that, and the next
+          # step would publish it.
+          set -o pipefail
+          find assets -maxdepth 1 -type f -print0 \
+            | xargs -0 gh release upload "$TAG" --clobber
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: assets/*
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false
+
+  smoke:
+    name: Smoke test the published binary
+    # Release runs only. This installs the package from Packagist, so there is
+    # nothing for it to install on a run that publishes nothing; the staged
+    # assets are checked by verify-assets instead.
+    if: needs.setup.outputs.release == 'true'
+    needs: [setup, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.setup.outputs.checkout-ref }}
+          submodules: recursive
+          persist-credentials: false
+
+      # pie is a dependency like any other, so mise manages it: mise.lock
+      # records the sha256 and mise verifies GitHub's artifact attestations on
+      # download. It runs here on the runner, never inside the container --
+      # only the phar crosses over, so the image below stays exactly as bare as
+      # it was.
+      - name: Setup mise
+        uses: jdx/mise-action@6d1e696aa24c1aa1bcc1adea0212707c71ab78a8 # v3.6.1
+        with:
+          install: false
+          # This action caches its tool directory by default, and a workflow
+          # that publishes release artifacts is the wrong place for a cache
+          # anything else can write to. mise.lock's checksum would catch a
+          # substituted phar, but not needing to rely on that is cheaper than
+          # re-downloading 7MB. links.yml keeps the cache; it publishes
+          # nothing.
+          cache: false
+
+      - name: Install pie
+        env:
+          MISE_AUTO_INSTALL: "false"
+          # The github backend queries the API; the default token keeps this
+          # off the unauthenticated rate limit on a release run.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: mise install "github:php/pie"
+
+      - name: pie install in a container with no compiler
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          MMDB_VERSION: ${{ needs.setup.outputs.mmdb-version }}
+        run: |
+          # ubuntu:24.04 plus php8.3-cli from apt: glibc 2.39 (comfortably
+          # above the 2.36 floor), x86_64, NTS, and crucially no compiler and
+          # no phpize anywhere on the image. If the prebuilt asset is missing
+          # or malformed, PIE cannot quietly fall back to a source build and
+          # hide the problem -- the install just fails.
+          cat > "$RUNNER_TEMP/smoke.sh" <<'SMOKE'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          # php-zip is what PIE unpacks the asset with; mbstring and curl are
+          # for PIE itself. None of these pull in a compiler or autotools, and
+          # the curl *binary* is deliberately not among them -- it was only ever
+          # here to fetch pie, which now arrives mounted.
+          apt-get install -y -qq --no-install-recommends \
+            ca-certificates \
+            php8.3-cli php8.3-zip php8.3-mbstring php8.3-curl
+          for tool in cc gcc g++ make phpize; do
+            if command -v "$tool" >/dev/null; then
+              echo "::error::$tool is present; this container is not compiler-free."
+              exit 1
+            fi
+          done
+
+          # Run the phar with the container's own PHP rather than one of pie's
+          # platform binaries, which bundle a PHP of their own: `pie install`
+          # has to target the PHP a user would be installing into, and that is
+          # the one in here.
+          pie() { php /work/pie.phar "$@"; }
+
+          # Non-Windows prebuilt binaries need PIE >= 1.4.0. mise.lock is what
+          # holds the version, so this asserts rather than prints: it is the
+          # thing that notices if the lock is ever moved below the floor.
+          pie_version="$(pie --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
+          case "$pie_version" in
+            '') echo "::error::Could not read a version from pie."; exit 1 ;;
+          esac
+          if [ "$(printf '%s\n1.4.0\n' "$pie_version" | sort -V | head -n1)" != "1.4.0" ]; then
+            echo "::error::PIE $pie_version is below 1.4.0, which prebuilt non-Windows binaries need."
+            exit 1
+          fi
+          echo "PIE $pie_version"
+
+          # Packagist can lag a tag push by a minute or two.
+          version="${TAG#v}"
+          installed=0
+          for _ in $(seq 1 10); do
+            if pie install "maxmind-db/reader-ext:${version}"; then
+              installed=1
+              break
+            fi
+            echo "Retrying in 30s (Packagist may not have $version yet)..."
+            sleep 30
+          done
+          if [ "$installed" -ne 1 ]; then
+            echo "::error::pie install never succeeded for $version."
+            exit 1
+          fi
+
+          php --ri maxminddb
+          php /work/verify.php /work/test.mmdb "$MMDB_VERSION"
+          SMOKE
+
+          mkdir -p "$RUNNER_TEMP/work"
+          # Copied rather than mounted from its install path: mise leaves the
+          # phar mode 0711, which a non-root container user could not read.
+          cp "$(mise which pie.phar)" "$RUNNER_TEMP/work/pie.phar"
+          cp MaxMind-DB-Reader-php/dev-bin/verify-extension.php "$RUNNER_TEMP/work/verify.php"
+          cp MaxMind-DB-Reader-php/tests/data/test-data/GeoIP2-City-Test.mmdb \
+            "$RUNNER_TEMP/work/test.mmdb"
+
+          docker run --rm \
+            -e TAG \
+            -e MMDB_VERSION \
+            -v "$RUNNER_TEMP/smoke.sh:/smoke.sh:ro" \
+            -v "$RUNNER_TEMP/work:/work:ro" \
+            ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 \
+            bash /smoke.sh
