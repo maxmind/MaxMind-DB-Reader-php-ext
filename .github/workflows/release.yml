@@ -679,10 +679,16 @@ jobs:
   macos:
     name: macOS arm64 PHP ${{ matrix.php-version }} ${{ matrix.ts }}
     needs: [setup]
-    # macos-14 is the oldest arm64 image GitHub offers. There is no container
+    # The runner does not set the macOS floor. There is no container
     # equivalent of the Linux glibc pin on macOS, so the floor is set by the
     # deployment target the build step exports and asserted in the gate step.
-    runs-on: macos-14
+    #
+    # The image must be a macOS version that Homebrew supports. The
+    # shivammathur/php tap has bottles only for those versions, and on any
+    # other image setup-php builds PHP from source and fails
+    # (shivammathur/setup-php#1125). The version is pinned rather than
+    # macos-latest so that the build image changes only with a commit.
+    runs-on: macos-26
     permissions:
       contents: read
     strategy:
@@ -760,7 +766,7 @@ jobs:
           TAG: ${{ needs.setup.outputs.tag }}
           MATRIX_PHP: ${{ matrix.php-version }}
           MATRIX_TS: ${{ matrix.ts }}
-          # macos-14 is arm64-only; the script still cross-checks it against
+          # macos-26 is arm64-only; the script still cross-checks it against
           # what the runner reports.
           MATRIX_ARCH: arm64
         # PIE calls the macOS libc bsdlibc.
