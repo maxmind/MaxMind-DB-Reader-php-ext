@@ -1079,7 +1079,7 @@ jobs:
       # only the phar crosses over, so the image below stays exactly as bare as
       # it was.
       - name: Setup mise
-        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
         with:
           install: false
           # This action caches its tool directory by default, and a workflow
