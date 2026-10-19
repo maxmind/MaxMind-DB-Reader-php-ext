@@ -408,7 +408,7 @@ jobs:
           done
           echo "Bundled libmaxminddb sources are present."
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-asset-source-tarball
           path: ${{ env.TARBALL }}
@@ -670,7 +670,7 @@ jobs:
           MATRIX_ARCH: ${{ matrix.arch }}
         run: dev-bin/stage-asset.sh "$RUNNER_TEMP/out" "$RUNNER_TEMP/stage" linux glibc
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-asset-linux-${{ matrix.arch }}-php${{ matrix.php-version }}-${{ matrix.ts }}
           path: ${{ env.ASSET }}
@@ -772,7 +772,7 @@ jobs:
         # PIE calls the macOS libc bsdlibc.
         run: dev-bin/stage-asset.sh "$RUNNER_TEMP/out" "$RUNNER_TEMP/stage" darwin bsdlibc
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-asset-macos-php${{ matrix.php-version }}-${{ matrix.ts }}
           path: ${{ env.ASSET }}
