@@ -1,0 +1,31 @@
+# TEST ONLY. DO NOT MERGE.
+#
+# This workflow checks whether PIE can install the published v1.15.0 release
+# on Windows. The Windows zips on that release use a commit SHA where PIE
+# expects the version, so this job is expected to fail until someone renames
+# those zips. Close the pull request that adds this file without merging it.
+name: "TEST ONLY (do not merge): PIE Windows install"
+
+on: pull_request
+
+permissions: {}
+
+jobs:
+  pie-windows:
+    name: pie install maxmind-db/reader-ext 1.15.0 on Windows
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: shivammathur/setup-php@4424c9aab975b57bd706ee5a39c6b4334d6e4f60 # 2.40.0
+        with:
+          php-version: "8.4"
+          tools: none
+
+      - name: Install the published extension with PIE
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          Invoke-WebRequest https://github.com/php/pie/releases/download/1.5.5/pie.phar -OutFile pie.phar
+          php pie.phar install maxmind-db/reader-ext:1.15.0
