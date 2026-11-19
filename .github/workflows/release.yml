@@ -766,7 +766,6 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      count: ${{ steps.count.outputs.count }}
     steps:
       - name: Get the extension matrix
         id: matrix
@@ -775,30 +774,6 @@ jobs:
           # Pinned rather than derived from composer.json so the Windows lane
           # covers the same PHP versions as every other lane.
           php-version-list: ${{ join(fromJSON(needs.setup.outputs.php-versions), ', ') }}
-
-      - name: Count the expected Windows assets
-        id: count
-        env:
-          MATRIX: ${{ steps.matrix.outputs.matrix }}
-        run: |
-          count="$(jq 'if type == "array" then length else (.include | length) end' <<<"$MATRIX")"
-          # Shape before magnitude: `set -e` is suspended inside an `if`, so
-          # `[ "$count" -lt 1 ]` on a non-integer exits 2 and makes the whole
-          # condition false -- the guard passes and collect-assets.sh then
-          # coerces the value to 0, silently dropping the Windows legs from the
-          # expected asset count.
-          case "$count" in
-            '' | *[!0-9]*)
-              echo "::error::Could not count the Windows matrix; jq returned '$count'."
-              exit 1
-              ;;
-          esac
-          if [ "$count" -lt 1 ]; then
-            echo "::error::The Windows matrix is empty."
-            exit 1
-          fi
-          echo "Windows will produce $count assets."
-          echo "count=$count" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Windows ${{ matrix.arch }} PHP ${{ matrix.php-version }} ${{ matrix.ts }}
@@ -952,7 +927,6 @@ jobs:
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
-          WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
           WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
@@ -989,7 +963,6 @@ jobs:
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
-          WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
           WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
