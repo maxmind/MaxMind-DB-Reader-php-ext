@@ -7,7 +7,8 @@
 #
 # Usage: collect-assets.sh <dist-dir> <assets-dir>
 #
-# Reads TAG, PHP_VERSIONS, TS_MODES, LINUX_ARCHES and WINDOWS_COUNT.
+# Reads TAG, PHP_VERSIONS, TS_MODES, LINUX_ARCHES, WINDOWS_COUNT and
+# WINDOWS_MATRIX.
 
 set -euo pipefail
 
@@ -66,3 +67,29 @@ find "$assets" -maxdepth 1 -type f -printf '  %f\n' | sort
 # this one file.
 [ -f "$assets/maxminddb-${TAG}.tgz" ] ||
     fail "$assets/maxminddb-${TAG}.tgz is missing."
+
+# php-windows-builder drops a PHP version it does not support from the matrix
+# without a message, and the checks below trust the matrix.
+jq -e --argjson want "$PHP_VERSIONS" \
+    '[.include[]."php-version"] | unique == ($want | unique)' \
+    <<<"${WINDOWS_MATRIX:?}" >/dev/null ||
+    fail "The Windows matrix does not build exactly the PHP versions $PHP_VERSIONS."
+
+# PIE downloads a Windows zip only by its exact name, which has the tag in it.
+# It then loads the DLL in the zip by the same name. The matrix does not give
+# the compiler, so accept any.
+legs="$(jq -r '.include[] | [."php-version", .ts, .arch] | @tsv' <<<"$WINDOWS_MATRIX")"
+while IFS=$'\t' read -r php ts arch; do
+    if [ "$arch" = x64 ]; then
+        arch=x86_64
+    fi
+    name="php_maxminddb-${TAG}-${php}-${ts}-vs*-${arch}.zip"
+    matches=("$assets"/php_maxminddb-"$TAG"-"$php"-"$ts"-vs[0-9][0-9]-"$arch".zip)
+    zip="${matches[0]}"
+    [ -f "$zip" ] ||
+        fail "No Windows asset has the name that PIE expects: $name."
+    dll="$(basename "$zip" .zip).dll"
+    listing="$(unzip -Z1 "$zip")" || fail "Could not list the files in $zip."
+    grep -qxF "$dll" <<<"$listing" ||
+        fail "$zip does not contain $dll, which PIE loads."
+done <<<"$legs"

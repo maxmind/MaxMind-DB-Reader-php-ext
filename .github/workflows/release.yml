@@ -953,6 +953,7 @@ jobs:
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
           WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
+          WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
   publish:
@@ -989,6 +990,7 @@ jobs:
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
           WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
+          WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
       - name: Upload the assets to the draft release
