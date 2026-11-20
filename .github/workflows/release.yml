@@ -43,6 +43,7 @@ jobs:
       php-versions: ${{ steps.resolve.outputs.php-versions }}
       ts-modes: ${{ steps.resolve.outputs.ts-modes }}
       linux-arches: ${{ steps.resolve.outputs.linux-arches }}
+      linux-exclude: ${{ steps.resolve.outputs.linux-exclude }}
       mmdb-version: ${{ steps.resolve.outputs.mmdb-version }}
       checkout-ref: ${{ steps.resolve.outputs.checkout-ref }}
     steps:
@@ -126,12 +127,16 @@ jobs:
 
           # Single source of truth for every lane's matrix *and* for the
           # asset-count assertion, so the two cannot drift.
-          php='["8.2","8.3","8.4","8.5"]'
+          php='["8.2","8.3","8.4","8.5","8.6"]'
           ts='["nts","zts"]'
           arches='["x86_64","arm64"]'
+          # Linux legs with no build image. docker-library publishes PHP 8.6
+          # as ZTS only (docker-library/php#1686). ENG-5854 tracks adding 8.6
+          # NTS back.
+          linux_exclude='[{"php-version":"8.6","ts":"nts"}]'
           if [ "$full" != true ]; then
             # The knob. A dry run is there to prove the workflow still works,
-            # not to certify every ABI, and 41 assets is a lot to spend on a
+            # not to certify every ABI, and 49 assets is a lot to spend on a
             # link fix. Dropping PHP versions is the reduction that costs least
             # coverage of the workflow itself: both TS modes and both Linux
             # architectures stay, because those are the legs whose steps
@@ -140,7 +145,7 @@ jobs:
             #
             # The two kept are the ends of the supported range rather than one
             # in the middle. For Linux a single version would do, since the
-            # submodule's test-bundled.yml compiles 7.2 through 8.5 on every
+            # submodule's test-bundled.yml compiles every PHP from 7.2 on every
             # push -- but it has no macOS job at all, and upstream's Windows
             # job is x64/nts/8.4 only. Whatever this list omits is therefore
             # first compiled for those platforms on a tag, where publish
@@ -149,8 +154,12 @@ jobs:
             # break shows up.
             #
             # Widen by adding versions here, or dispatch with full-matrix.
-            php='["8.2","8.5"]'
+            php='["8.2","8.6"]'
           fi
+          # Keep only the exclusions that match a leg, because
+          # collect-assets.sh subtracts each one from the expected count.
+          linux_exclude="$(jq -c --argjson php "$php" \
+            '[.[] | select(."php-version" as $v | $php | index($v))]' <<<"$linux_exclude")"
 
           # Every other job checks this out. On a release it is the tag, so a
           # workflow_dispatch re-cut builds the tagged commit rather than
@@ -186,6 +195,7 @@ jobs:
             echo "php-versions=$php"
             echo "ts-modes=$ts"
             echo "linux-arches=$arches"
+            echo "linux-exclude=$linux_exclude"
             echo "mmdb-version=$mmdb_version"
             echo "checkout-ref=$checkout_ref"
           } >> "$GITHUB_OUTPUT"
@@ -413,9 +423,9 @@ jobs:
       #
       # One PHP is enough: what is being tested is the tarball's file list,
       # which does not vary by PHP version, and the Linux lane already builds
-      # every version. Same digest as that lane's 8.5 nts image, so this is a
+      # every version. Same digest as that lane's 8.6 zts image, so this is a
       # version the reduced pull-request matrix builds too.
-      IMAGE: php:8.5-cli-bookworm@sha256:08ff080781ceb69e81f886513b89daa830aee389abef4bdebc174737b9c0ba81
+      IMAGE: php:8.6-cli-bookworm@sha256:519fe569bdde71e366206a99e1996519fc12897f6fba1cd70b9815ce18f7639c
       # Same container family as the Linux lane, so the same ceiling applies.
       # See that job for why this is a separate constant rather than something
       # derived from the image.
@@ -550,6 +560,7 @@ jobs:
         php-version: ${{ fromJSON(needs.setup.outputs.php-versions) }}
         ts: ${{ fromJSON(needs.setup.outputs.ts-modes) }}
         arch: ${{ fromJSON(needs.setup.outputs.linux-arches) }}
+        exclude: ${{ fromJSON(needs.setup.outputs.linux-exclude) }}
         include:
           # arm64 is built on a native ARM runner. A qemu build would be slow
           # and would not exercise the hardware users actually run on.
@@ -606,6 +617,8 @@ jobs:
             8.3-zts) image="php:8.3-zts-bookworm@sha256:bc362fc5d8105ef5494449687f6ad2943b3f01b5c41410fe12ea04d8fed25703" ;;
             8.4-zts) image="php:8.4-zts-bookworm@sha256:1058567505382d754e61e9d3f919e5f59a6f234e29a69eb3c19c353373356f2e" ;;
             8.5-zts) image="php:8.5-zts-bookworm@sha256:f6130a7b4539d29083b7a18aa901c0df2282ed6c9f5c93c50a68eb1f9ce8e9f1" ;;
+            # From 8.6, the cli image is ZTS and there is no -zts tag.
+            8.6-zts) image="php:8.6-cli-bookworm@sha256:519fe569bdde71e366206a99e1996519fc12897f6fba1cd70b9815ce18f7639c" ;;
             *)
               echo "::error::No pinned image for PHP ${PHP_VERSION} ${TS}."
               exit 1
@@ -927,6 +940,7 @@ jobs:
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
+          LINUX_EXCLUDE: ${{ needs.setup.outputs.linux-exclude }}
           WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
@@ -963,6 +977,7 @@ jobs:
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
+          LINUX_EXCLUDE: ${{ needs.setup.outputs.linux-exclude }}
           WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
