@@ -40,7 +40,6 @@ jobs:
     outputs:
       release: ${{ steps.resolve.outputs.release }}
       tag: ${{ steps.resolve.outputs.tag }}
-      ext-ref: ${{ steps.resolve.outputs.ext-ref }}
       php-versions: ${{ steps.resolve.outputs.php-versions }}
       ts-modes: ${{ steps.resolve.outputs.ts-modes }}
       linux-arches: ${{ steps.resolve.outputs.linux-arches }}
@@ -125,24 +124,6 @@ jobs:
             exit 1
           fi
 
-          # The Windows lane builds maxmind/MaxMind-DB-Reader-php directly --
-          # a different repository from this packaging shim -- so it needs a ref
-          # there rather than a checkout here. The submodule pointer is that
-          # ref on every run, including a release.
-          #
-          # It used to be the tag on a release, which meant the Windows assets
-          # came from upstream's $TAG while Linux, macOS and the tarball came
-          # from the submodule pointer, with nothing asserting the two were the
-          # same commit. They agree only if the releaser happened to tag
-          # upstream at exactly the pointer, and the MMDB_VERSION check cannot
-          # notice when they do not: it compares libmaxminddb's PACKAGE_VERSION,
-          # not the extension's own C sources. This is the same "mixture
-          # published under the tag's name" the checkout_ref below fixed.
-          #
-          # The submodule pointer is also the better answer on its own terms --
-          # it is what this repository says the release contains.
-          ext_ref="$(git rev-parse HEAD:MaxMind-DB-Reader-php)"
-
           # Single source of truth for every lane's matrix *and* for the
           # asset-count assertion, so the two cannot drift.
           php='["8.2","8.3","8.4","8.5"]'
@@ -202,7 +183,6 @@ jobs:
           {
             echo "release=$release"
             echo "tag=$TAG"
-            echo "ext-ref=$ext_ref"
             echo "php-versions=$php"
             echo "ts-modes=$ts"
             echo "linux-arches=$arches"
@@ -786,44 +766,14 @@ jobs:
       contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
-      count: ${{ steps.count.outputs.count }}
     steps:
       - name: Get the extension matrix
         id: matrix
         uses: php/php-windows-builder/extension-matrix@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
-          # The C sources and config.w32 live in the main repository; this repo
-          # is only the PIE packaging shim and keeps them in a submodule, which
-          # the action's own checkout would not initialise.
-          extension-url: https://github.com/maxmind/MaxMind-DB-Reader-php
-          extension-ref: ${{ needs.setup.outputs.ext-ref }}
           # Pinned rather than derived from composer.json so the Windows lane
           # covers the same PHP versions as every other lane.
           php-version-list: ${{ join(fromJSON(needs.setup.outputs.php-versions), ', ') }}
-
-      - name: Count the expected Windows assets
-        id: count
-        env:
-          MATRIX: ${{ steps.matrix.outputs.matrix }}
-        run: |
-          count="$(jq 'if type == "array" then length else (.include | length) end' <<<"$MATRIX")"
-          # Shape before magnitude: `set -e` is suspended inside an `if`, so
-          # `[ "$count" -lt 1 ]` on a non-integer exits 2 and makes the whole
-          # condition false -- the guard passes and collect-assets.sh then
-          # coerces the value to 0, silently dropping the Windows legs from the
-          # expected asset count.
-          case "$count" in
-            '' | *[!0-9]*)
-              echo "::error::Could not count the Windows matrix; jq returned '$count'."
-              exit 1
-              ;;
-          esac
-          if [ "$count" -lt 1 ]; then
-            echo "::error::The Windows matrix is empty."
-            exit 1
-          fi
-          echo "Windows will produce $count assets."
-          echo "count=$count" >> "$GITHUB_OUTPUT"
 
   windows:
     name: Windows ${{ matrix.arch }} PHP ${{ matrix.php-version }} ${{ matrix.ts }}
@@ -848,12 +798,22 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
+      # The build action names the zip, and the DLL and PDB in it, after
+      # extension-ref, and PIE finds them by the release tag. A tag on the
+      # submodule commit gives the action that name and builds the same commit
+      # as the Linux and macOS lanes. The tag is local to this runner.
+      - name: Tag the submodule commit
+        shell: bash
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: git -C MaxMind-DB-Reader-php tag --force "$TAG"
+
       - name: Build the extension
         id: build
         uses: php/php-windows-builder/extension@29352c0ef9e8ce65264ea9e287881a6f7758a953 # 1.9.0
         with:
-          extension-url: https://github.com/maxmind/MaxMind-DB-Reader-php
-          extension-ref: ${{ needs.setup.outputs.ext-ref }}
+          extension-url: ${{ github.workspace }}/MaxMind-DB-Reader-php
+          extension-ref: ${{ needs.setup.outputs.tag }}
           build-directory: ext
           php-version: ${{ matrix.php-version }}
           arch: ${{ matrix.arch }}
@@ -867,9 +827,6 @@ jobs:
           # config.w32 to accept the lib-prefixed name the archive actually
           # ships (maxmind/MaxMind-DB-Reader-php#263).
           args: --with-maxminddb --with-maxminddb-bundled
-        # The action stages its own artifact; PIE resolves Windows assets
-        # through a separate windows-binary mechanism with its own name format,
-        # which php/php-windows-builder produces by default.
 
       # What the Linux and macOS lanes get from gate-extension.sh and their
       # load-and-query steps. Uploading the artifact is the action's own last
@@ -970,7 +927,7 @@ jobs:
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
-          WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
+          WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
   publish:
@@ -1006,7 +963,7 @@ jobs:
           PHP_VERSIONS: ${{ needs.setup.outputs.php-versions }}
           TS_MODES: ${{ needs.setup.outputs.ts-modes }}
           LINUX_ARCHES: ${{ needs.setup.outputs.linux-arches }}
-          WINDOWS_COUNT: ${{ needs.windows-matrix.outputs.count }}
+          WINDOWS_MATRIX: ${{ needs.windows-matrix.outputs.matrix }}
         run: dev-bin/collect-assets.sh dist assets
 
       - name: Upload the assets to the draft release
