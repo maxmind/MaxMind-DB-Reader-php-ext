@@ -7,7 +7,8 @@
 #
 # Usage: collect-assets.sh <dist-dir> <assets-dir>
 #
-# Reads TAG, PHP_VERSIONS, TS_MODES, LINUX_ARCHES and WINDOWS_MATRIX.
+# Reads TAG, PHP_VERSIONS, TS_MODES, LINUX_ARCHES, LINUX_EXCLUDE and
+# WINDOWS_MATRIX.
 
 set -euo pipefail
 
@@ -42,8 +43,11 @@ windows_count="$(jq '.include | length' <<<"$WINDOWS_MATRIX")"
 php_count="$(jq 'length' <<<"$PHP_VERSIONS")"
 ts_count="$(jq 'length' <<<"$TS_MODES")"
 arch_count="$(jq 'length' <<<"$LINUX_ARCHES")"
-# Linux (php x ts x arch) + macOS (php x ts).
-binary_count=$((php_count * ts_count * arch_count + php_count * ts_count))
+# Each entry is a php and ts pair that Linux skips on every arch. setup keeps
+# only the pairs that match a leg.
+exclude_count="$(jq 'length' <<<"${LINUX_EXCLUDE:?}")"
+# Linux (php x ts x arch, minus the exclusions) + macOS (php x ts).
+binary_count=$(((php_count * ts_count - exclude_count) * arch_count + php_count * ts_count))
 
 # 1 source tarball + the binary lanes + one zip for each leg of the Windows
 # matrix. The other lists come from setup, which is also what each matrix
